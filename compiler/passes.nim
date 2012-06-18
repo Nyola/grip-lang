@@ -142,13 +142,22 @@ proc processImplicits(implicits: seq[string], nodeKind: TNodeKind,
     str.info = gCmdLineInfo
     importStmt.addSon str
     processTopLevelStmt importStmt, a
-  
+
+type
+  TGripProc = proc (module: PSym, filename: string, stream: PLLStream)
+
+var grip*: TGripProc
+
 proc processModule(module: PSym, filename: string, stream: PLLStream, 
                    rd: PRodReader) = 
   var 
     p: TParsers
     a: TPassContextArray
     s: PLLStream
+  if filename.endsWith(".g"):
+    grip(module, filename, stream)
+    return
+
   if rd == nil: 
     openPasses(a, module, filename)
     if stream == nil: 

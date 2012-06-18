@@ -10,13 +10,15 @@
 # implements the command dispatcher and several commands as well as the
 # module handling
 
-import 
+import
   llstream, strutils, ast, astalgo, lexer, syntaxes, renderer, options, msgs, 
   os, lists, condsyms, rodread, rodwrite, ropes, trees, 
   wordrecg, sem, semdata, idents, passes, docgen, extccomp,
   cgen, ecmasgen,
   platform, nimconf, importer, passaux, depends, transf, evals, types, idgen,
   tables, docgen2
+
+import grip
 
 const
   has_LLVM_Backend = false

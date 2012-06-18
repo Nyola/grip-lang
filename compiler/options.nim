@@ -206,6 +206,7 @@ proc FindFile*(f: string): string {.procvar.} =
 proc findModule*(modulename: string): string {.inline.} =
   # returns path to module
   result = FindFile(AddFileExt(modulename, nimExt))
+  if len(result) == 0: result = FindFile(AddFileExt(modulename, ".g"))
 
 proc binaryStrSearch*(x: openarray[string], y: string): int = 
   var a = 0
