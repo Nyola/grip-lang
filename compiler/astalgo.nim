@@ -418,6 +418,8 @@ proc debugTree(n: PNode, indent: int, maxRecDepth: int): PRope =
                    [istr, makeYamlString($n.kind)])
     if maxRecDepth != 0: 
       case n.kind
+      of nkSourceRange:
+        appf(result, ",$N$1: $2", [istr, toRope(" ")])
       of nkCharLit..nkInt64Lit: 
         appf(result, ",$N$1\"intVal\": $2", [istr, toRope(n.intVal)])
       of nkFloatLit, nkFloat32Lit, nkFloat64Lit: 

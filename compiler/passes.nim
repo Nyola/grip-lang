@@ -155,7 +155,12 @@ proc processModule(module: PSym, filename: string, stream: PLLStream,
     a: TPassContextArray
     s: PLLStream
   if filename.endsWith(".g"):
-    grip(module, filename, stream)
+    if stream == nil:
+      s = LLStreamOpen(filename, fmRead)
+      if s == nil: 
+        rawMessage(errCannotOpenFile, filename)
+        return
+    grip(module, filename, s)
     return
 
   if rd == nil: 

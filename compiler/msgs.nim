@@ -11,8 +11,9 @@ import
   options, strutils, os, tables
 
 type 
-  TMsgKind* = enum 
-    errUnknown, errIllFormedAstX, errCannotOpenFile, errInternal, errGenerated, 
+  TMsgKind* = enum
+    errUnknown, errClosingXExpected, errUnexpectedCharacter,
+    errIllFormedAstX, errCannotOpenFile, errInternal, errGenerated, 
     errXCompilerDoesNotSupportCpp, errStringLiteralExpected, 
     errIntLiteralExpected, errInvalidCharacterConstant, 
     errClosingTripleQuoteExpected, errClosingQuoteExpected, 
@@ -112,6 +113,8 @@ type
 const 
   MsgKindToStr*: array[TMsgKind, string] = [
     errUnknown: "unknown error", 
+    errClosingXExpected: "closing $1 expected, but end of file reached",
+    errUnexpectedCharacter: "unexpected character: $1",
     errIllFormedAstX: "illformed AST: $1",
     errCannotOpenFile: "cannot open \'$1\'", 
     errInternal: "internal error: $1", 
@@ -402,7 +405,9 @@ type
                                # only 8 bytes.
     line*, col*: int16
     fileIndex*: int32
-    
+   
+  TPos* = tuple[line, col: int16]
+  
   ERecoverableError* = object of EInvalidValue
 
 var
@@ -414,6 +419,10 @@ proc newFileInfo(fullPath, projPath: string): TFileInfo =
   #shallow(result.fullPath)
   result.projPath = projPath
   #shallow(result.projPath)
+
+proc newPos*(line, col: int16): TPos =
+  result.line = line
+  result.col = col
 
 proc fileInfoIdx*(filename: string): int32 =
   var

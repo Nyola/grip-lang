@@ -39,6 +39,7 @@ type
   TNodeKind* = enum # order is extremely important, because ranges are used
                     # to check whether a node belongs to a certain class
     nkNone,               # unknown node kind: indicates an error
+    nkSourceRange,        # a range of the program source yet to be parsed
                           # Expressions:
                           # Atoms:
     nkEmpty,              # the node is empty
@@ -478,6 +479,8 @@ type
     info*: TLineInfo
     flags*: TNodeFlags
     case Kind*: TNodeKind
+    of nkSourceRange:
+      ends*: TPos # the beggining is indicated by the info field
     of nkCharLit..nkUInt64Lit:
       intVal*: biggestInt
     of nkFloatLit..nkFloat128Lit:
