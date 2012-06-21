@@ -12,7 +12,9 @@ import
 
 type 
   TMsgKind* = enum
-    errUnknown, errClosingXExpected, errUnexpectedCharacter,
+    errUnknown,
+    errClosingXExpected, errUnexpectedCharacter, errInvalidOperator,
+    errXCantBeUsedAsPostfix, errXCantBeUsedAsPrefix,
     errIllFormedAstX, errCannotOpenFile, errInternal, errGenerated, 
     errXCompilerDoesNotSupportCpp, errStringLiteralExpected, 
     errIntLiteralExpected, errInvalidCharacterConstant, 
@@ -115,6 +117,9 @@ const
     errUnknown: "unknown error", 
     errClosingXExpected: "closing $1 expected, but end of file reached",
     errUnexpectedCharacter: "unexpected character: $1",
+    errInvalidOperator: "invalid operator: $1",
+    errXCantBeUsedAsPostfix: "$1 can't be used as postfix operator",
+    errXCantBeUsedAsPrefix: "$1 can't be used as prefix operator",
     errIllFormedAstX: "illformed AST: $1",
     errCannotOpenFile: "cannot open \'$1\'", 
     errInternal: "internal error: $1", 

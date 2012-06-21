@@ -11,21 +11,101 @@ type
     lines: TLines # consider gap buffers for these
     indents: seq[int]
     indentMode: TIndentMode
+    pos: TPos
+    bounds: TPos
+    callChain: TShuntingYardStack
+    expChain : TShuntingYardStack
+    breakCall: bool
+    pendingOp: TPrecedence
 
   PGripFile = ref TGripFile
+ 
+  TPrecedence = tuple[id: PNode, opdat: TOpData, before, after: TWhiteSpace]
+  
+  TShuntingYardStack = object
+    opStack: array[0..1024, TPrecedence]
+    opStackTop: int
+    expStack: array[0..1024, PNode]
+    expStackTop: int
 
+  TOpFlag = enum
+    Left,
+    Right,
+    Prefix,
+    Infix,
+    Postfix,
+    CallBreaker,
+    Unary,
+  
+  TOpFlags = set[TOpFlag]
+
+  TOpData = object
+    precedence: int
+    flags: TOpFlags
+
+  TWhiteSpace = tuple[spaces, tabs, newlines: int]
+    
 const
   IDStartChars = { 'a'..'z', 'A'..'Z' }
   IDChars = { 'a'..'z', 'A'..'Z', '0'..'9' }
   NumStartChars = { '0'..'9' }
   NumChars = { '0'..'9', '.' }
   StrStartChars = { '\'', '\"' }
+  CharsWS = {' ', '\t'}
   OpChars = { ':', '=', '.', ';', ',', '~', '@', '#', '$', '\\',
               '<', '>', '&', '|', '!', '?', '%', '^', '+', '-', '*', '/' }
 
   EOF = '\0'
 
 var gGripFiles: seq[PGripFile] = @[]
+
+proc getOp(id: PIdent): TOpData =
+  template ret(prec, f: expr): stmt =
+    result.precedence = 220 - prec
+    result.flags = f
+    # result.flags = flags
+
+  case id.s
+  of ";":
+    ret(50, {Left, Infix, CallBreaker})
+  of "=", "+=", "-=", "*=", "/=", "%=", "<<=", ">>=", "^=", "&=":
+    ret(60, {Right, Infix, CallBreaker})
+  of "if", "unless", "while", "for":
+    ret(70, {Right, Infix, CallBreaker})
+  of "else":
+    ret(80, {Left, Infix, CallBreaker})
+  of "|", "|>", "=>", "->":
+    ret(110, {Left, Infix, CallBreaker})
+  of "<|":
+    ret(110, {Right, Infix, CallBreaker})
+  of ",":
+    ret(30, {Left, Infix})
+  of "*", "/", "%", "#":
+    ret(60, {Left, Infix, Prefix, Postfix})
+  of "and":
+    ret(80, {Left, Infix})
+  of "or":
+    ret(70, {Left, Infix})
+  of "in", "is", "notin", "isnt", "of":
+    ret(120, {Left, Infix})
+  of "==", "!=", "===", "~=":
+    ret(120, {Left, Infix})
+  of "<", ">":
+    ret(130, {Left, Infix, Prefix})
+  of "<=", ">=":
+    ret(130, {Left, Infix})
+  of "<<", ">>":
+    ret(140, {Left, Infix, Prefix})
+  of "+", "-":
+    ret(150, {Left, Infix, Prefix, Postfix})
+  of "++", "--", "?", "!", "&", "@":
+    ret(180, {Right, Infix, Prefix, Postfix})
+  of ":", "::":
+    ret(190, {Left, Infix, Prefix})
+  of ".":
+    ret(200, {Left, Infix, Prefix, Postfix})
+  else:
+    result.precedence = -1
 
 proc countIndent(line: string, c: char): int =
   for i in countup(0, line.len - 1):
@@ -94,9 +174,23 @@ iterator eatCharsInLine(g: PGripFile, pos: var TPos): char =
   # catch the first character
   if pos.col > int16(0): pos.col -= int16(1)
 
-  while pos.col < g.lines[pos.line].len - 1:
+  while pos.col < g.lines[pos.line].len:
     inc pos.col
     yield charAt(g, pos)
+
+proc pos(i: TLineInfo): TPos =
+  result = newPos(i.line, i.col)
+
+proc `<`(lhs, rhs: TPos): bool =
+  if lhs.line < rhs.line: return true
+  if lhs.line > rhs.line: return false
+  return lhs.col < rhs.col
+
+proc whitespaceFactor(c: TPrecedence): int =
+  result = c.before.spaces + c.after.spaces
+
+proc totalChars(ws: TWhiteSpace): int =
+  result = ws.spaces + ws.tabs + ws.newlines
 
 proc stepBack(g: PGripFile, p: TPos): TPos =
   result = p
@@ -110,13 +204,29 @@ proc stepForward(g: PGripFile, p: TPos): TPos =
   result = p
   discard eatChar(g, result)
 
-proc lineAt(g:PGripFile, p: TPos): string =
+proc lineAt(g: PGripFile, p: TPos): string =
   return g.lines[p.line]
 
-proc lineinfo(g:PGripFile, p: TPos): TLineInfo =
+proc sourceText(g: PGripFile, begins, ends: TPos): string =
+  assert begins < ends
+  if begins >= ends: return ""
+
+  if begins.line == ends.line:
+    return substr(g.lines[begins.line], begins.col, ends.col)
+  else:
+    result = substr(g.lines[begins.line], begins.col)
+    result.add "\n"
+    
+    for line in countup(begins.line + 1, ends.line - 1):
+      result.add(g.lines[line])
+      result.add "\n"
+
+    result.add(substr(g.lines[ends.line], 0, ends.col))
+
+proc lineinfo(g: PGripFile, p: TPos): TLineInfo =
   return newLineInfo(g.fileIdx, p.line, p.col)
 
-proc lineinfo(g:PGripFile, line, col: int): TLineInfo =
+proc lineinfo(g: PGripFile, line, col: int): TLineInfo =
   return newLineInfo(g.fileIdx, line, col)
 
 template scanLine(g, p, charClass: expr, body: stmt): stmt =
@@ -143,15 +253,16 @@ proc scanNum(g: PGripFile, p: var TPos): PNode =
 
 proc scanId(g: PGripFile, p: var TPos): PNode =
   scanLine(g, p, IDChars): nil
-
   let id = getIdent(line.substr(scanStart.col, i-1))
   result = newIdentNode(id, lineinfo(g, scanStart))
 
 proc scanOp(g: PGripFile, p: var TPos): PNode =
   scanLine(g, p, OpChars): nil
-
-  let id = getIdent(line.substr(scanStart.col, i))
-  result = newIdentNode(id, lineinfo(g, p))
+  
+  if i == scanStart.col: return scanId(g, p)
+  
+  let id = getIdent(line.substr(scanStart.col, i-1))
+  result = newIdentNode(id, lineinfo(g, scanStart))
 
 proc error(g: PGripFile, p: TPos, msg: TMsgKind, arg = "") =
   GlobalError(lineinfo(g, p), msg, arg)
@@ -179,16 +290,86 @@ proc scanToEnd(g: PGripFile, s,e: char, pos: var TPos): PNode =
     elif c == s:
       count += 1
 
-proc scanWhiteSpace(g: PGripFile, pos: var TPos): tuple[spaces, tabs: int] =
+proc scanWhiteSpace(g: PGripFile, pos: var TPos): TWhiteSpace =
   for c in eatCharsInLine(g, pos):
     if c notin {' ', '\t'}: break
     if c == ' ': result.spaces += 1
     else: result.tabs += 1
 
-proc parseExpr(g: PGripFile, pos: var TPos): PNode
 proc parseCall(g: PGripFile, s, e: int): PNode
+proc parseExpr(g: PGripFile, pos: var TPos): PNode
+proc parsePrimaryExpr(g: PGripFile, pos: var TPos): PNode
 
-proc parsePostExpr(g: PGripFile, pos: var TPos, n: PNode): PNode =
+proc pushExp(s: var TShuntingYardStack, n: PNode) =
+  s.expStackTop += 1
+  s.expStack[s.expStackTop] = n
+
+proc pushOp(s: var TShuntingYardStack, op: TPrecedence) =
+  s.opStackTop += 1
+  s.opStack[s.opStackTop] = op
+
+proc clear(s: var TShuntingYardStack) =
+  s.opStackTop = -1
+  s.expStackTop = -1
+
+proc popStacks(s: var TShuntingYardStack) =
+  let info = s.opStack[s.opStackTop].id.info
+
+  if Unary in s.opStack[s.opStackTop].opdat.flags:
+    s.expStack[s.expStackTop] = newNode(nkCall, info, @[
+      s.opStack[s.opStackTop].id,
+      s.expStack[s.expStackTop]])
+
+    s.opStackTop -= 1
+    
+  else:
+    var i1, i2: int
+    if Left in s.opStack[s.opStackTop].opdat.flags:
+      i1 = 1
+    else:
+      i2 = 1
+
+    s.expStack[s.expStackTop - 1] = newNode(nkCall, info, @[
+      s.opStack[s.opStackTop].id,
+      s.expStack[s.expStackTop - i1],
+      s.expStack[s.expStackTop - i2]])
+
+    s.expStackTop -= 1
+    s.opStackTop -= 1
+
+proc processOp(s: var TShuntingYardStack, op: TPrecedence) =
+  # This implements the shunting yard algorithm explained here:
+  # http://en.wikipedia.org/wiki/Shunting-yard_algorithm
+  # Few modifications are made to support whitespace sensitivity and
+  # prefix and postfix operators
+  while s.opStackTop >= 0:
+    let
+      opWs = op.whitespaceFactor
+      topWs = s.opStack[s.opStackTop].whitespaceFactor
+
+    if opWs < topWs:
+      break
+
+    let
+      nextPrecedence = op.opdat.precedence + ord(Left in op.opdat.flags)
+      topPrecedence = s.opStack[s.opStackTop].opdat.precedence
+
+    if opWs > topWs or nextPrecedence <= topPrecedence:
+      popStacks(s)
+    else:
+      break
+
+  pushOp(s, op)
+
+proc debug(s: TShuntingYardStack) =
+  for i in countup(0, s.opStackTop):
+    echo "OP STACK ", i, " ", s.opStack[i].id.ident.s
+
+  for i in countup(0, s.expStackTop):
+    echo "EXP STACK ", i
+    debug s.expStack[i]
+
+proc parseIndexers(g: PGripFile, pos: var TPos, n: PNode): PNode =
   result = n
   let c = charAt(g, pos)
   case c
@@ -199,26 +380,8 @@ proc parsePostExpr(g: PGripFile, pos: var TPos, n: PNode): PNode =
     let exp = scanToEnd(g, '[', ']', pos)
     # result.n = newNode(nkCall, e.n.info, @[getIdent"[]", result.n, exp.n])
     # kuresult.ends = exp.ends
-  of OpChars:
-    var op = scanOp(g, pos)
-    let next = charAt(g, op.ends)
-    if next in { ' ', '\t' }:
-      result = newNode(nkPostfix, n.info, @[n, op])
-    else:
-      let nextExp = parseExpr(g, pos)
-      if op.ident.s == ".":
-        result = newNode(nkDotExpr, n.info, @[n, nextExp])
-      else:
-        result = newNode(nkCall, n.info, @[op, n, nextExp])
-
-      result = parsePostExpr(g, pos, result)
-  of ' ', '\t':
-    let ws = scanWhiteSpace(g, pos)
-  of EOF: nil
   else:
-    echo "in POST PARSE EXPR"
-    debugCursor g, pos
-    error(g, pos, errUnexpectedCharacter, tostring(c))
+    nil
 
 proc firstCall(g: PGripFile, line: int): int =
   for i in line .. < g.lines.len:
@@ -265,14 +428,122 @@ proc parseNestedBlock(g: PGripFile, pos: var TPos): PNode =
     result = newNode(nkStmtList, lineinfo(g, pos), @[])
   else:
     result = parseBlock(g, pos)
+
+proc parseBlockArgs(g: PGripFile, args, retType: PNode): PNode =
+  result = newNode(nkFormalParams, args.info, @[retType])
+  var pos = args.info.pos
+  while pos < args.ends:
+    let info = lineinfo(g, pos)
+    let param = parseExpr(g, pos)
+    case param.kind
+    of nkIdent:
+      result.addSon(newNode(nkIdentDefs, info, @[param, emptyNode, emptyNode]))
+    else:
+      echo "UNKNOWN PARAM"
+      debug param
+
+proc isEmpty(ws: TWhiteSpace): bool =
+  return ws.tabs == 0 and ws.spaces == 0 and ws.newlines == 0
+
+proc isPrefix(op: TPrecedence): bool =
+  if not op.after.isEmpty or op.before.isEmpty:
+    return false
+
+  if Prefix in op.opdat.flags:
+    return true
+
+  if Infix notin op.opdat.flags:
+    GlobalError(op.id.info, errXCantBeUsedAsPrefix, op.id.ident.s)
+
+  return false
+
+proc isPostfix(op: TPrecedence): bool =
+  if not op.before.isEmpty or op.after.isEmpty:
+    return false
   
-proc parseExpr(g: PGripFile, pos: var TPos): PNode =
+  if Postfix in op.opdat.flags:
+    return true
+
+  if Infix notin op.opdat.flags:
+    GlobalError(op.id.info, errXCantBeUsedAsPostfix, op.id.ident.s)
+
+  return false
+
+proc parseWsAndOps(g: PGripFile, pos: var TPos, n: PNode): PNode =
+  result = n
+
+  clear(g.expChain)
+  
+  if n.kind == nkPrefix:
+    # If the input expression already has a prefix operator,
+    # feed it into the opstack so it can play nicely with 
+    # any following operators
+    
+    # the before/after will be auto set to 0 just like we need
+    var op: TPrecedence
+    op.id = n[0]
+    op.opdat = getOp(n[0].ident)
+    op.opdat.flags.incl Unary
+
+    g.expChain.pushOp(op)
+    g.expChain.pushExp(n[1])
+  else:
+    g.expChain.pushExp(result)
+
+  while true:
+    var next: TPrecedence
+    next.before = scanWhiteSpace(g, pos)
+   
+    let c = charAt(g, pos)
+    if c notin OpChars + IDStartChars:
+      break
+   
+    var preOp = pos
+    next.id = scanOp(g, pos)
+    next.opdat = getOp(next.id.ident)
+    if next.opdat.precedence == -1:
+      if c in OpChars: error(g, pos, errInvalidOperator, next.id.ident.s)
+      else: break
+
+    next.after = scanWhiteSpace(g, pos)
+    
+    if CallBreaker in next.opdat.flags:
+      g.pendingOp = next
+      g.breakCall = true
+      break
+
+    if isPrefix(next):
+      pos.col = next.id.info.col
+      break
+
+    g.expChain.processOp(next)
+
+    if isPostfix(next):
+      g.expChain.opStack[g.expChain.opStackTop].opdat.flags.incl Unary
+      # backtrack a little bit so the next op can compute
+      # its leading whitespace correctly
+      pos.col -= next.after.totalChars.int16
+      continue
+
+    g.expChain.pushExp(parsePrimaryExpr(g, pos))
+
+  while g.expChain.opStackTop >= 0:
+    g.expChain.popStacks()
+
+  result = g.expChain.expStack[0]
+
+proc parsePrimaryExpr(g: PGripFile, pos: var TPos): PNode =
   var start = pos
   let c = charAt(g, pos)
-  echo "PARSE EXPR ", c
+  echo "PRIMARY EXPR ", c
   case c
   of IDStartChars:
     result = scanId(g, pos)
+
+  of OpChars:
+    let op = scanOp(g, pos)
+    let exp = parsePrimaryExpr(g, pos)
+    result = newNode(nkPrefix, op.info, @[op, exp])
 
   of NumStartChars:
     result = scanNum(g, pos)
@@ -294,15 +565,23 @@ proc parseExpr(g: PGripFile, pos: var TPos): PNode =
       debugCursor g, pos
     if charAt(g, pos) != EOF:
       echo "trying to parse body"
+      # @@ turn this into parseCall
       body = parseExpr(g, pos)
     else:
       echo "trying nested block"
       body = parseNestedBlock(g, pos)
+    
+    args = parseBlockArgs(g, args, retType)
+    result = newNode(nkLambda, lineinfo(g, start), @[emptyNode, emptyNode, args, emptyNode, body])
 
-    result = newNode(nkLambda, lineinfo(g, start), @[args, retType, body])
+  of '{':
+    var parens = scanToEnd(g, '{', '}', pos)
+    result = newNode(nkPar, lineinfo(g, start), @[parens])
 
   of StrStartChars:
-    result = scanToEnd(g, c, c, pos)
+    let range = scanToEnd(g, c, c, pos)
+    result = newStrNode(nkStrLit, sourceText(g, range.info.pos, range.ends))
+    result.info = range.info
 
   else:
     echo "in PARSE EXPR"
@@ -310,25 +589,60 @@ proc parseExpr(g: PGripFile, pos: var TPos): PNode =
     error(g, pos, errUnexpectedCharacter, tostring(c))
 
   if pos.line == result.info.line:
-    result = parsePostExpr(g, pos, result)
+    result = parseIndexers(g, pos, result)
+
+  echo "END PRIMARY"
+
+proc parseExpr(g: PGripFile, pos: var TPos): PNode =
+  echo "PARSE EXPR"
+
+  result = parsePrimaryExpr(g, pos)
+  result = parseWsAndOps(g, pos, result)
+  
+  echo "END PARSE EXPR"
+  debugCursor g, pos
 
 proc isLineEnd(g: PGripFile, p: TPos): bool =
   return p.col >= g.lines[p.line].len
 
+proc parseCall2(g: PGripFile, pos: var TPos) =
+  while true:
+    g.breakCall = false
+    let callee = parseExpr(g, pos)
+    echo "parsing call "
+    debug callee
+    var call = newNode(nkCall, callee.info, @[callee])
+    g.callChain.pushExp(call)
+        
+    if isLineEnd(g, pos):
+      return
+    
+    while true:
+      if g.breakCall:
+        echo "CALL BROKEN by ", g.pendingOp.id.ident.s
+        g.callChain.processOp(g.pendingOp)
+        debug g.callChain
+        break
+
+      if isLineEnd(g, pos):
+        return
+
+      let param = parseExpr(g, pos)
+      call.addSon(param)
+
 proc parseCall(g: PGripFile, s, e: int): PNode =
   var pos = newPos(int16(s), int16(0))
-  let actionWord = parseExpr(g, pos)
+  clear(g.callChain)
   
-  result = newNode(nkCall, actionWord.info, @[actionWord])
-  echo "pre loop"
-  debugCursor g, pos
-  while not isLineEnd(g, pos):
-    echo "in loop"
-    debugCursor g, pos
-    let param = parseExpr(g, pos)
-    result.addSon(param)
+  parseCall2(g, pos)
+  
+  echo "PARSE CALL OP STACK"
+  debug g.callChain
+
+  while g.callChain.opStackTop >= 0:
+    popStacks(g.callChain)
     
-  let hasText = isLineEnd(g, pos)
+  return g.callChain.expStack[0]
 
 proc parse(filename: string, stream: PLLStream): TPassData =
   var
