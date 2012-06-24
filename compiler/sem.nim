@@ -230,3 +230,6 @@ proc semPass(): TPass =
   result.openCached = myOpenCached
   result.close = myClose
   result.process = myProcess
+
+include semgrip
+

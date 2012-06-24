@@ -1,5 +1,6 @@
 import
-  passes, ast, llstream, msgs, idents, sem, semdata, cgen, transf, strutils, astalgo
+  passes, ast, llstream, msgs, idents, sem, semdata, cgen, transf,
+  strutils, astalgo, wordrecg
 
 type
   TPassData = tuple[input: PNode, closeOutput: Pnode]
@@ -13,8 +14,6 @@ type
     indentMode: TIndentMode
     pos: TPos
     bounds: TPos
-    callChain: TShuntingYardStack
-    expChain : TShuntingYardStack
     breakCall: bool
     pendingOp: TPrecedence
 
@@ -296,6 +295,15 @@ proc scanWhiteSpace(g: PGripFile, pos: var TPos): TWhiteSpace =
     if c == ' ': result.spaces += 1
     else: result.tabs += 1
 
+proc sexp(id: Pnode, sons: openarray[PNode]): PNode =
+  case id.ident.id
+  of ord(wDot):
+    result = newNode(nkDotExpr, id.info, sons[0..1])
+  else:
+    result = newNodeI(nkCall, id.info)
+    result.sons = @[id]
+    result.sons.add(sons)
+
 proc parseCall(g: PGripFile, s, e: int): PNode
 proc parseExpr(g: PGripFile, pos: var TPos): PNode
 proc parsePrimaryExpr(g: PGripFile, pos: var TPos): PNode
@@ -313,12 +321,10 @@ proc clear(s: var TShuntingYardStack) =
   s.expStackTop = -1
 
 proc popStacks(s: var TShuntingYardStack) =
-  let info = s.opStack[s.opStackTop].id.info
-
   if Unary in s.opStack[s.opStackTop].opdat.flags:
-    s.expStack[s.expStackTop] = newNode(nkCall, info, @[
+    s.expStack[s.expStackTop] = sexp(
       s.opStack[s.opStackTop].id,
-      s.expStack[s.expStackTop]])
+      s.expStack[s.expStackTop])
 
     s.opStackTop -= 1
     
@@ -329,10 +335,10 @@ proc popStacks(s: var TShuntingYardStack) =
     else:
       i2 = 1
 
-    s.expStack[s.expStackTop - 1] = newNode(nkCall, info, @[
+    s.expStack[s.expStackTop - 1] = sexp(
       s.opStack[s.opStackTop].id,
       s.expStack[s.expStackTop - i1],
-      s.expStack[s.expStackTop - i2]])
+      s.expStack[s.expStackTop - i2])
 
     s.expStackTop -= 1
     s.opStackTop -= 1
@@ -433,14 +439,7 @@ proc parseBlockArgs(g: PGripFile, args, retType: PNode): PNode =
   result = newNode(nkFormalParams, args.info, @[retType])
   var pos = args.info.pos
   while pos < args.ends:
-    let info = lineinfo(g, pos)
-    let param = parseExpr(g, pos)
-    case param.kind
-    of nkIdent:
-      result.addSon(newNode(nkIdentDefs, info, @[param, emptyNode, emptyNode]))
-    else:
-      echo "UNKNOWN PARAM"
-      debug param
+    result.addSon(parseExpr(g, pos))
 
 proc isEmpty(ws: TWhiteSpace): bool =
   return ws.tabs == 0 and ws.spaces == 0 and ws.newlines == 0
@@ -472,7 +471,8 @@ proc isPostfix(op: TPrecedence): bool =
 proc parseWsAndOps(g: PGripFile, pos: var TPos, n: PNode): PNode =
   result = n
 
-  clear(g.expChain)
+  var expChain: TShuntingYardStack
+  clear(expChain)
   
   if n.kind == nkPrefix:
     # If the input expression already has a prefix operator,
@@ -485,10 +485,10 @@ proc parseWsAndOps(g: PGripFile, pos: var TPos, n: PNode): PNode =
     op.opdat = getOp(n[0].ident)
     op.opdat.flags.incl Unary
 
-    g.expChain.pushOp(op)
-    g.expChain.pushExp(n[1])
+    expChain.pushOp(op)
+    expChain.pushExp(n[1])
   else:
-    g.expChain.pushExp(result)
+    expChain.pushExp(result)
 
   while true:
     var next: TPrecedence
@@ -496,14 +496,18 @@ proc parseWsAndOps(g: PGripFile, pos: var TPos, n: PNode): PNode =
    
     let c = charAt(g, pos)
     if c notin OpChars + IDStartChars:
+      echo "breaking after ws"
       break
    
     var preOp = pos
     next.id = scanOp(g, pos)
     next.opdat = getOp(next.id.ident)
     if next.opdat.precedence == -1:
-      if c in OpChars: error(g, pos, errInvalidOperator, next.id.ident.s)
-      else: break
+      if c in OpChars:
+        error(g, pos, errInvalidOperator, next.id.ident.s)
+      else:
+        pos = preOp
+        break
 
     next.after = scanWhiteSpace(g, pos)
     
@@ -516,21 +520,21 @@ proc parseWsAndOps(g: PGripFile, pos: var TPos, n: PNode): PNode =
       pos.col = next.id.info.col
       break
 
-    g.expChain.processOp(next)
+    expChain.processOp(next)
 
     if isPostfix(next):
-      g.expChain.opStack[g.expChain.opStackTop].opdat.flags.incl Unary
+      expChain.opStack[expChain.opStackTop].opdat.flags.incl Unary
       # backtrack a little bit so the next op can compute
       # its leading whitespace correctly
       pos.col -= next.after.totalChars.int16
       continue
 
-    g.expChain.pushExp(parsePrimaryExpr(g, pos))
+    expChain.pushExp(parsePrimaryExpr(g, pos))
 
-  while g.expChain.opStackTop >= 0:
-    g.expChain.popStacks()
+  while expChain.opStackTop >= 0:
+    expChain.popStacks()
 
-  result = g.expChain.expStack[0]
+  result = expChain.expStack[0]
 
 proc parsePrimaryExpr(g: PGripFile, pos: var TPos): PNode =
   var start = pos
@@ -553,10 +557,13 @@ proc parsePrimaryExpr(g: PGripFile, pos: var TPos): PNode =
     result = newNode(nkPar, lineinfo(g, start), @[parens])
 
   of '[':
-    var args = scanToEnd(g, '[', ']', pos)
-    var ws = scanWhiteSpace(g, pos)
-    let c = charAt(g, pos)
-    var retType, body: PNode
+    var
+      args = scanToEnd(g, '[', ']', pos)
+      ws = scanWhiteSpace(g, pos)
+      retType = emptyNode
+      c = charAt(g, pos)
+      body: PNode
+
     if c == ':':
       discard eatChar(g, pos)
       ws = scanWhiteSpace(g, pos)
@@ -605,66 +612,67 @@ proc parseExpr(g: PGripFile, pos: var TPos): PNode =
 proc isLineEnd(g: PGripFile, p: TPos): bool =
   return p.col >= g.lines[p.line].len
 
-proc parseCall2(g: PGripFile, pos: var TPos) =
-  while true:
-    g.breakCall = false
-    let callee = parseExpr(g, pos)
-    echo "parsing call "
-    debug callee
-    var call = newNode(nkCall, callee.info, @[callee])
-    g.callChain.pushExp(call)
-        
-    if isLineEnd(g, pos):
-      return
-    
-    while true:
-      if g.breakCall:
-        echo "CALL BROKEN by ", g.pendingOp.id.ident.s
-        g.callChain.processOp(g.pendingOp)
-        debug g.callChain
-        break
-
-      if isLineEnd(g, pos):
-        return
-
-      let param = parseExpr(g, pos)
-      call.addSon(param)
-
 proc parseCall(g: PGripFile, s, e: int): PNode =
   var pos = newPos(int16(s), int16(0))
-  clear(g.callChain)
+  var callChain: TShuntingYardStack
+  clear(callChain)
   
-  parseCall2(g, pos)
-  
-  echo "PARSE CALL OP STACK"
-  debug g.callChain
+  block ParseLine:
+    while true:
+      g.breakCall = false
+      let callee = parseExpr(g, pos)
+      echo "parsing call "
+      debug callee
+      var call = sexp(callee)
+      callChain.pushExp(call)
+          
+      if isLineEnd(g, pos):
+        break ParseLine
+      
+      while true:
+        if g.breakCall:
+          echo "CALL BROKEN by ", g.pendingOp.id.ident.s
+          callChain.processOp(g.pendingOp)
+          debug callChain
+          break
 
-  while g.callChain.opStackTop >= 0:
-    popStacks(g.callChain)
+        if isLineEnd(g, pos):
+          break ParseLine
+
+        let param = parseExpr(g, pos)
+        call.addSon(param)
+  
+  while callChain.opStackTop >= 0:
+    popStacks(callChain)
     
-  return g.callChain.expStack[0]
+  return callChain.expStack[0]
 
-proc parse(filename: string, stream: PLLStream): TPassData =
+proc parse(filename: string, stream: PLLStream): PNode =
   var
     g = readGripFile(filename, stream)
     pos = newPos(int16(0), int16(0))
   
-  var topBlock = parseBlock(g, pos)
-  # result.input = topBlock.n
-  result.input = newNode(nkStmtList, UnknownLineInfo(), @[])
+  result = parseBlock(g, pos)
     
 proc carryPass(p: TPass, module: PSym, filename: string, m: TPassData): TPassData =
   var c = p.open(module, filename)
   result.input = p.process(c, m.input)
   result.closeOutput = p.close(c, m.closeOutput)
 
-proc sem(module: PSym, filename: string, m: TPassData): TPassData =
-  result = carryPass(semPass(), module, filename, m)
-  result = carryPass(transfPass(), module, filename, result)
-  discard carryPass(cgenPass(), module, filename, result)
-
 proc CompileGrip(module: PSym, filename: string, stream: PLLStream) =
-  discard sem(module, filename, parse(filename, stream))
+  var nodes = parse(filename, stream)
+
+  var nimSem = semPass()
+  var c = nimSem.open(module, filename)
+  
+  for i in 0.. <nodes.sonsLen:
+    debug nodes[i]
+    nodes.sons[i] = semGrip(c, nodes[i])
+  
+  var passData = (input: nodes, closeOutput: nimSem.close(c, nil))
+
+  passData = carryPass(transfPass(), module, filename, passData)
+  discard carryPass(cgenPass(), module, filename, passData)
 
 passes.grip = CompileGrip
 

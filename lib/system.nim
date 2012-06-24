@@ -730,6 +730,11 @@ proc `@` * [IDX, T](a: array[IDX, T]): seq[T] {.
   ## sequences with the array constructor: ``@[1, 2, 3]`` has the type 
   ## ``seq[int]``, while ``[1, 2, 3]`` has the type ``array[0..2, int]``. 
 
+proc `@` * [T](a: openarray[T]): seq[T] =
+  ## turns an openarray into a sequence.
+  newSeq(result, a.len)
+  for i in 0.. <a.len: result[i] = a[i]
+
 proc setLen*[T](s: var seq[T], newlen: int) {.
   magic: "SetLengthSeq", noSideEffect.}
   ## sets the length of `s` to `newlen`.
@@ -2188,6 +2193,13 @@ proc `[]=`*[Idx, T](a: var array[Idx, T], x: TSlice[Idx], b: openArray[T]) =
     raise newException(EOutOfRange, "differing lengths for slice assignment")
 
 proc `[]`*[T](s: seq[T], x: TSlice[int]): seq[T] = 
+  ## slice operation for sequences. Negative indexes are supported.
+  var a = x.a-|s
+  var L = x.b-|s - a + 1
+  newSeq(result, L)
+  for i in 0.. <L: result[i] = s[i + a]
+
+proc `[]`*[T](s: openarray[T], x: TSlice[int]): seq[T] = 
   ## slice operation for sequences. Negative indexes are supported.
   var a = x.a-|s
   var L = x.b-|s - a + 1
