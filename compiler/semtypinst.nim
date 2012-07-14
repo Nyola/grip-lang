@@ -9,7 +9,7 @@
 
 # This module does the instantiation of generic types.
 
-import ast, astalgo, msgs, types, semdata, renderer
+import ast, astalgo, msgs, types, magicsys, semdata, renderer
 
 proc checkPartialConstructedType(info: TLineInfo, t: PType) =
   if tfAcyclic in t.flags and skipTypes(t, abstractInst).kind != tyObject:
@@ -30,12 +30,6 @@ proc checkConstructedType*(info: TLineInfo, typ: PType) =
     if t.kind == tyObject and t.sons[0] != nil:
       if t.sons[0].kind != tyObject or tfFinal in t.sons[0].flags: 
         localError(info, errInheritanceOnlyWithNonFinalObjects)
-  
-proc containsGenericTypeIter(t: PType, closure: PObject): bool = 
-  result = t.kind in GenericTypes
-
-proc containsGenericType*(t: PType): bool = 
-  result = iterOverType(t, containsGenericTypeIter, nil)
 
 proc searchInstTypes(tab: TIdTable, key: PType): PType = 
   # returns nil if we need to declare this type
@@ -167,14 +161,14 @@ proc handleGenericInvokation(cl: var TReplTypeVars, t: PType): PType =
     for i in countup(0, sonsLen(t) - 1): 
       # if one of the params is not concrete, we cannot do anything
       # but we already raised an error!
-      addSon(result, header.sons[i])
+      rawAddSon(result, header.sons[i])
     
     var newbody = ReplaceTypeVarsT(cl, lastSon(body))
     newbody.flags = newbody.flags + t.flags + body.flags
     result.flags = result.flags + newbody.flags
     newbody.callConv = body.callConv
     newbody.n = ReplaceTypeVarsN(cl, lastSon(body).n)
-    addSon(result, newbody)
+    rawAddSon(result, newbody)
     checkPartialConstructedType(cl.info, newbody)
   else:
     for i in countup(1, sonsLen(t) - 1):
@@ -214,6 +208,8 @@ proc ReplaceTypeVarsT*(cl: var TReplTypeVars, t: PType): PType =
   of tyGenericBody: 
     InternalError(cl.info, "ReplaceTypeVarsT: tyGenericBody")
     result = ReplaceTypeVarsT(cl, lastSon(t))
+  of tyInt:
+    result = skipIntLit(t)
   else:
     if containsGenericType(t):
       result = copyType(t, t.owner, false)

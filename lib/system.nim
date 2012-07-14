@@ -55,23 +55,23 @@ type
                                 ## a type description (for templates)
   void* {.magic: "VoidType".}  ## meta type to denote the absense of any type
   
-  TSignedInt* = distinct int|int8|int16|int32|int64
+  TSignedInt* = int|int8|int16|int32|int64
     ## type class matching all signed integer types
 
-  TUnsignedInt* = distinct uint|uint8|uint16|uint32|uint64
+  TUnsignedInt* = uint|uint8|uint16|uint32|uint64
     ## type class matching all unsigned integer types
 
-  TInteger* = distinct TSignedInt|TUnsignedInt
+  TInteger* = TSignedInt|TUnsignedInt
     ## type class matching all integer types
 
-  TOrdinal* = distinct TInteger|bool|enum
+  TOrdinal* = int|int8|int16|int32|int64|bool|enum|uint8|uint16|uint32
     ## type class matching all ordinal types; however this includes enums with
     ## holes.
   
-  TReal* = distinct float|float32|float64
+  TReal* = float|float32|float64
     ## type class matching all floating point number types
 
-  TNumber* = distinct TInteger|TReal
+  TNumber* = TInteger|TReal
     ## type class matching all number types
 
 proc defined*(x: expr): bool {.magic: "Defined", noSideEffect.}
@@ -182,8 +182,8 @@ when not defined(EcmaScript) and not defined(NimrodVM):
   include "system/hti"
 
 type
-  Byte* = Int8 ## this is an alias for ``int8``, that is a signed
-               ## int 8 bits wide.
+  Byte* = uInt8 ## this is an alias for ``uint8``, that is an unsigned
+                ## int 8 bits wide.
 
   Natural* = range[0..high(int)]
     ## is an int type ranging from zero to the maximum value
@@ -533,12 +533,7 @@ proc abs*(x: int64): int64 {.magic: "AbsI64", noSideEffect.}
   ## checking is turned on).
 
 type
-  UIntMax32 = distinct uint|uint8|uint16|uint32
   IntMax32  = distinct int|int8|int16|int32
-
-proc `+` *(x, y: UIntMax32): UIntMax32 {.magic: "AddU", noSideEffect.}
-proc `+` *(x, y: UInt64): uint64 {.magic: "AddU64", noSideEffect.}
-  ## Binary `+` operator for unsigned integers.
 
 proc `+%` *(x, y: IntMax32): IntMax32 {.magic: "AddU", noSideEffect.}
 proc `+%` *(x, y: Int64): Int64 {.magic: "AddU64", noSideEffect.}
@@ -546,19 +541,11 @@ proc `+%` *(x, y: Int64): Int64 {.magic: "AddU64", noSideEffect.}
   ## fit into the result. This implements modulo arithmetic. No overflow
   ## errors are possible.
 
-proc `-` *(x, y: UIntMax32): UIntMax32 {.magic: "SubU", noSideEffect.}
-proc `-` *(x, y: UInt64): UInt64 {.magic: "SubU64", noSideEffect.}
-  ## Binary `-` operator for unsigned integers.
-
 proc `-%` *(x, y: IntMax32): IntMax32 {.magic: "SubU", noSideEffect.}
 proc `-%` *(x, y: Int64): Int64 {.magic: "SubU64", noSideEffect.}
   ## treats `x` and `y` as unsigned and subtracts them. The result is
   ## truncated to fit into the result. This implements modulo arithmetic.
   ## No overflow errors are possible.
-
-proc `*` *(x, y: UIntMax32): UIntMax32 {.magic: "MulU", noSideEffect.}
-proc `*` *(x, y: UInt64): UInt64 {.magic: "MulU64", noSideEffect.}
-  ## Binary `*` operator for unsigned integers.
 
 proc `*%` *(x, y: IntMax32): IntMax32 {.magic: "MulU", noSideEffect.}
 proc `*%` *(x, y: Int64): Int64 {.magic: "MulU64", noSideEffect.}
@@ -566,31 +553,11 @@ proc `*%` *(x, y: Int64): Int64 {.magic: "MulU64", noSideEffect.}
   ## truncated to fit into the result. This implements modulo arithmetic.
   ## No overflow errors are possible.
 
-proc `div` *(x, y: UIntMax32): UIntMax32 {.magic: "DivU", noSideEffect.}
-proc `div` *(x, y: UInt64): UInt64 {.magic: "DivU64", noSideEffect.}
-  ## computes the integer division. This is roughly the same as
-  ## ``floor(x/y)``.
-  
-proc `/` *(x, y: UIntMax32): UIntMax32 {.magic: "DivU", noSideEffect.}
-proc `/` *(x, y: UInt64): UInt64 {.magic: "DivU64", noSideEffect.}
-  ## computes the integer division. This is roughly the same as
-  ## ``floor(x/y)``.
-
 proc `/%` *(x, y: IntMax32): IntMax32 {.magic: "DivU", noSideEffect.}
 proc `/%` *(x, y: Int64): Int64 {.magic: "DivU64", noSideEffect.}
   ## treats `x` and `y` as unsigned and divides them. The result is
   ## truncated to fit into the result. This implements modulo arithmetic.
   ## No overflow errors are possible.
-
-proc `%` *(x, y: UIntMax32): UIntMax32 {.magic: "DivU", noSideEffect.}
-proc `%` *(x, y: UInt64): UInt64 {.magic: "DivU64", noSideEffect.}
-  ## computes the integer modulo operation. This is the same as
-  ## ``x - (x div y) * y``.
-
-proc `mod` *(x, y: UIntMax32): UIntMax32 {.magic: "DivU", noSideEffect.}
-proc `mod` *(x, y: UInt64): UInt64 {.magic: "DivU64", noSideEffect.}
-  ## computes the integer modulo operation. This is the same as
-  ## ``x - (x div y) * y``.
 
 proc `%%` *(x, y: IntMax32): IntMax32 {.magic: "ModU", noSideEffect.}
 proc `%%` *(x, y: Int64): Int64 {.magic: "ModU64", noSideEffect.}
@@ -598,19 +565,11 @@ proc `%%` *(x, y: Int64): Int64 {.magic: "ModU64", noSideEffect.}
   ## The result is truncated to fit into the result.
   ## This implements modulo arithmetic.
   ## No overflow errors are possible.
-
-proc `<=` *(x, y: UIntMax32): bool {.magic: "LeU", noSideEffect.}
-proc `<=` *(x, y: UInt64): bool {.magic: "LeU64", noSideEffect.}
-  ## Returns true iff ``x <= y``.
   
 proc `<=%` *(x, y: IntMax32): bool {.magic: "LeU", noSideEffect.}
 proc `<=%` *(x, y: Int64): bool {.magic: "LeU64", noSideEffect.}
   ## treats `x` and `y` as unsigned and compares them.
   ## Returns true iff ``unsigned(x) <= unsigned(y)``.
-
-proc `<` *(x, y: UIntMax32): bool {.magic: "LtU", noSideEffect.}
-proc `<` *(x, y: UInt64): bool {.magic: "LtU64", noSideEffect.}
-  ## Returns true iff ``unsigned(x) < unsigned(y)``.
 
 proc `<%` *(x, y: IntMax32): bool {.magic: "LtU", noSideEffect.}
 proc `<%` *(x, y: Int64): bool {.magic: "LtU64", noSideEffect.}
@@ -646,7 +605,7 @@ proc `-+-` *[T](x, y: set[T]): set[T] {.magic: "SymDiffSet", noSideEffect.}
   ## ``(A - B) + (B - A)``, but more efficient.
 
 # comparison operators:
-proc `==` *[T](x, y: ordinal[T]): bool {.magic: "EqEnum", noSideEffect.}
+proc `==` *[TEnum: enum](x, y: TEnum): bool {.magic: "EqEnum", noSideEffect.}
 proc `==` *(x, y: pointer): bool {.magic: "EqRef", noSideEffect.}
 proc `==` *(x, y: string): bool {.magic: "EqStr", noSideEffect.}
 proc `==` *(x, y: cstring): bool {.magic: "EqCString", noSideEffect.}
@@ -656,7 +615,7 @@ proc `==` *[T](x, y: set[T]): bool {.magic: "EqSet", noSideEffect.}
 proc `==` *[T](x, y: ref T): bool {.magic: "EqRef", noSideEffect.}
 proc `==` *[T](x, y: ptr T): bool {.magic: "EqRef", noSideEffect.}
 
-proc `<=` *[T](x, y: ordinal[T]): bool {.magic: "LeEnum", noSideEffect.}
+proc `<=` *[TEnum: enum](x, y: TEnum): bool {.magic: "LeEnum", noSideEffect.}
 proc `<=` *(x, y: string): bool {.magic: "LeStr", noSideEffect.}
 proc `<=` *(x, y: char): bool {.magic: "LeCh", noSideEffect.}
 proc `<=` *[T](x, y: set[T]): bool {.magic: "LeSet", noSideEffect.}
@@ -664,7 +623,7 @@ proc `<=` *(x, y: bool): bool {.magic: "LeB", noSideEffect.}
 proc `<=` *[T](x, y: ref T): bool {.magic: "LePtr", noSideEffect.}
 proc `<=` *(x, y: pointer): bool {.magic: "LePtr", noSideEffect.}
 
-proc `<` *[T](x, y: ordinal[T]): bool {.magic: "LtEnum", noSideEffect.}
+proc `<` *[TEnum: enum](x, y: TEnum): bool {.magic: "LtEnum", noSideEffect.}
 proc `<` *(x, y: string): bool {.magic: "LtStr", noSideEffect.}
 proc `<` *(x, y: char): bool {.magic: "LtCh", noSideEffect.}
 proc `<` *[T](x, y: set[T]): bool {.magic: "LtSet", noSideEffect.}
@@ -728,7 +687,7 @@ proc `@` * [IDX, T](a: array[IDX, T]): seq[T] {.
   magic: "ArrToSeq", nosideeffect.}
   ## turns an array into a sequence. This most often useful for constructing
   ## sequences with the array constructor: ``@[1, 2, 3]`` has the type 
-  ## ``seq[int]``, while ``[1, 2, 3]`` has the type ``array[0..2, int]``. 
+  ## ``seq[int]``, while ``[1, 2, 3]`` has the type ``array[0..2, int]``.
 
 proc `@` * [T](a: openarray[T]): seq[T] =
   ## turns an openarray into a sequence.
@@ -972,7 +931,7 @@ type
 type # these work for most platforms:
   cchar* {.importc: "char", nodecl.} = char
     ## This is the same as the type ``char`` in *C*.
-  cschar* {.importc: "signed char", nodecl.} = byte
+  cschar* {.importc: "signed char", nodecl.} = int8
     ## This is the same as the type ``signed char`` in *C*.
   cshort* {.importc: "short", nodecl.} = int16
     ## This is the same as the type ``short`` in *C*.
@@ -1161,6 +1120,12 @@ proc `$` *(x: int64): string {.magic: "Int64ToStr", noSideEffect.}
   ## The stingify operator for an integer argument. Returns `x`
   ## converted to a decimal string.
 
+when not defined(NimrodVM):
+  when not defined(ECMAScript):
+    proc `$` *(x: uint64): string {.noSideEffect.}
+      ## The stingify operator for an unsigned integer argument. Returns `x`
+      ## converted to a decimal string.
+
 proc `$` *(x: float): string {.magic: "FloatToStr", noSideEffect.}
   ## The stingify operator for a float argument. Returns `x`
   ## converted to a decimal string.
@@ -1182,7 +1147,7 @@ proc `$` *(x: string): string {.magic: "StrToStr", noSideEffect.}
   ## as it is. This operator is useful for generic code, so
   ## that ``$expr`` also works if ``expr`` is already a string.
 
-proc `$` *[T](x: ordinal[T]): string {.magic: "EnumToStr", noSideEffect.}
+proc `$` *[TEnum: enum](x: TEnum): string {.magic: "EnumToStr", noSideEffect.}
   ## The stingify operator for an enumeration argument. This works for
   ## any enumeration type thanks to compiler magic. If
   ## a ``$`` operator for a concrete enumeration is provided, this is
@@ -1233,14 +1198,14 @@ iterator countup*[S, T](a: S, b: T, step = 1): T {.inline.} =
   ## Counts from ordinal value `a` up to `b` with the given
   ## step count. `S`, `T` may be any ordinal type, `step` may only
   ## be positive.
-  var res: T = a
+  var res: T = T(a)
   while res <= b:
     yield res
     inc(res, step)
 
 iterator `..`*[S, T](a: S, b: T): T {.inline.} =
   ## An alias for `countup`.
-  var res: T = a
+  var res: T = T(a)
   while res <= b:
     yield res
     inc res
@@ -1378,6 +1343,13 @@ proc isNil*(x: pointer): bool {.noSideEffect, magic: "IsNil".}
 proc isNil*(x: cstring): bool {.noSideEffect, magic: "IsNil".}
   ## Fast check whether `x` is nil. This is sometimes more efficient than
   ## ``== nil``.
+
+proc `@`*[T](a: openArray[T]): seq[T] = 
+  ## turns an openarray into a sequence. This is not as efficient as turning
+  ## a fixed length array into a sequence as it always copies every element
+  ## of `a`.
+  newSeq(result, a.len)
+  for i in 0..a.len-1: result[i] = a[i]
 
 proc `&` *[T](x, y: seq[T]): seq[T] {.noSideEffect.} =
   newSeq(result, x.len + y.len)
@@ -1667,6 +1639,10 @@ proc echo*[Ty](x: openarray[Ty]) {.magic: "Echo", noSideEffect.}
   ## available for the ECMAScript target too.
   ## Unlike other IO operations this is guaranteed to be thread-safe as
   ## ``echo`` is very often used for debugging convenience.
+  ##
+  ## As a special semantic rule, ``echo`` pretends to be free of
+  ## side effects, so that it can be used for debugging routines marked as
+  ## ``noSideEffect``.
 
 template newException*(exceptn: typeDesc, message: string): expr = 
   ## creates an exception object of type ``exceptn`` and sets its ``msg`` field
@@ -1851,7 +1827,7 @@ when not defined(EcmaScript) and not defined(NimrodVM):
   proc getFileSize*(f: TFile): int64
     ## retrieves the file size (in bytes) of `f`.
 
-  proc ReadBytes*(f: TFile, a: var openarray[byte], start, len: int): int
+  proc ReadBytes*(f: TFile, a: var openarray[int8], start, len: int): int
     ## reads `len` bytes into the buffer `a` starting at ``a[start]``. Returns
     ## the actual number of bytes that have been read which may be less than
     ## `len` (if not as many bytes are remaining), but not greater.
@@ -1866,7 +1842,7 @@ when not defined(EcmaScript) and not defined(NimrodVM):
     ## the actual number of bytes that have been read which may be less than
     ## `len` (if not as many bytes are remaining), but not greater.
 
-  proc writeBytes*(f: TFile, a: openarray[byte], start, len: int): int
+  proc writeBytes*(f: TFile, a: openarray[int8], start, len: int): int
     ## writes the bytes of ``a[start..start+len-1]`` to the file `f`. Returns
     ## the number of actual written bytes, which may be less than `len` in case
     ## of an error.
@@ -2244,13 +2220,13 @@ proc staticExec*(command: string, input = ""): string {.
   ##
   ## ``gorge`` is an alias for ``staticExec``.
 
-proc `+=`*[T](x, y: ordinal[T]) {.magic: "Inc", noSideEffect.}
+proc `+=`*[T: TOrdinal](x: var T, y: T) {.magic: "Inc", noSideEffect.}
   ## Increments an ordinal
 
-proc `-=`*[T](x, y: ordinal[T]) {.magic: "Dec", noSideEffect.}
+proc `-=`*[T: TOrdinal](x: var T, y: T) {.magic: "Dec", noSideEffect.}
   ## Decrements an ordinal
 
-proc `*=`*[T](x: var ordinal[T], y: ordinal[T]) {.inline, noSideEffect.} =
+proc `*=`*[T: TOrdinal](x: var T, y: T) {.inline, noSideEffect.} =
   ## Binary `*=` operator for ordinals
   x = x * y
 

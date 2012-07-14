@@ -35,14 +35,15 @@ type
 proc toSdlColor*(c: TColor): Sdl.TColor =
   ## Convert colors.TColor to SDL.TColor
   var x = c.extractRGB  
-  result.r = toU8(x.r)
-  result.g = toU8(x.g)
-  result.b = toU8(x.b)
+  result.r = x.r and 0xff
+  result.g = x.g and 0xff
+  result.b = x.b and 0xff
 
 proc createSdlColor*(sur: PSurface, c: TColor, alpha: int = 0): int32 =
   ## Creates a color using ``sdl.MapRGBA``.
   var x = c.extractRGB
-  return sdl.MapRGBA(sur.s.format, toU8(x.r), toU8(x.g), toU8(x.b), toU8(alpha))
+  return sdl.MapRGBA(sur.s.format, x.r and 0xff, x.g and 0xff, 
+                     x.b and 0xff, alpha and 0xff)
 
 proc toSdlRect*(r: TRect): sdl.TRect =
   ## Convert ``graphics.TRect`` to ``sdl.TRect``.
@@ -73,7 +74,7 @@ proc fontFinalizer(f: PFont) = closeFont(f.f)
 proc newFont*(name = "VeraMono.ttf", size = 9, color = colBlack): PFont =  
   ## Creates a new font object. Raises ``EIO`` if the font cannot be loaded.
   new(result, fontFinalizer)
-  result.f = OpenFont(name, size)
+  result.f = OpenFont(name, size.cint)
   if result.f == nil:
     raise newException(EIO, "Could not open font file: " & name)
   result.color = toSdlColor(color)
@@ -106,10 +107,10 @@ type
   PPixels = ptr TPixels
 
 template setPix(video, pitch, x, y, col: expr): stmt =
-  video[y * pitch.int + x] = int32(col)
+  video[y * pitch + x] = int32(col)
 
 template getPix(video, pitch, x, y: expr): expr = 
-  colors.TColor(video[y * pitch.int + x])
+  colors.TColor(video[y * pitch + x])
 
 const
   ColSize = 4
@@ -117,7 +118,7 @@ const
 proc getPixel(sur: PSurface, x, y: Natural): colors.TColor {.inline.} =
   assert x <% sur.w
   assert y <% sur.h
-  result = getPix(cast[PPixels](sur.s.pixels), sur.s.pitch div ColSize.uint16, 
+  result = getPix(cast[PPixels](sur.s.pixels), sur.s.pitch.int div ColSize, 
                   x, y)
 
 proc setPixel(sur: PSurface, x, y: Natural, col: colors.TColor) {.inline.} =
@@ -125,7 +126,7 @@ proc setPixel(sur: PSurface, x, y: Natural, col: colors.TColor) {.inline.} =
   assert y <% sur.h
   var pixs = cast[PPixels](sur.s.pixels)
   #pixs[y * (sur.s.pitch div colSize) + x] = int(col)
-  setPix(pixs, sur.s.pitch div ColSize.uint16, x, y, col)
+  setPix(pixs, sur.s.pitch.int div ColSize, x, y, col)
 
 proc `[]`*(sur: PSurface, p: TPoint): TColor =
   ## get pixel at position `p`. No range checking is done!
@@ -251,7 +252,7 @@ proc drawLine*(sur: PSurface, p1, p2: TPoint, color: TColor) =
   dy = dy * 2 
   dx = dx * 2
   var video = cast[PPixels](sur.s.pixels)
-  var pitch = sur.s.pitch div ColSize
+  var pitch = sur.s.pitch.int div ColSize
   setPix(video, pitch, x0, y0, color)
   if dx > dy:
     var fraction = dy - (dx div 2)
@@ -275,7 +276,7 @@ proc drawLine*(sur: PSurface, p1, p2: TPoint, color: TColor) =
 proc drawHorLine*(sur: PSurface, x, y, w: Natural, Color: TColor) =
   ## draws a horizontal line from (x,y) to (x+w-1, y).
   var video = cast[PPixels](sur.s.pixels)
-  var pitch = sur.s.pitch div ColSize
+  var pitch = sur.s.pitch.int div ColSize
 
   if y >= 0 and y <= sur.s.h:
     for i in 0 .. min(sur.s.w-x, w)-1:
@@ -284,7 +285,7 @@ proc drawHorLine*(sur: PSurface, x, y, w: Natural, Color: TColor) =
 proc drawVerLine*(sur: PSurface, x, y, h: Natural, Color: TColor) =
   ## draws a vertical line from (x,y) to (x, y+h-1).
   var video = cast[PPixels](sur.s.pixels)
-  var pitch = sur.s.pitch div ColSize
+  var pitch = sur.s.pitch.int div ColSize
 
   if x >= 0 and x <= sur.s.w:
     for i in 0 .. min(sur.s.h-y, h)-1:
@@ -321,7 +322,7 @@ proc fillCircle*(s: PSurface, p: TPoint, r: Natural, color: TColor) =
 proc drawRect*(sur: PSurface, r: TRect, color: TColor) =
   ## draws a rectangle.
   var video = cast[PPixels](sur.s.pixels)
-  var pitch = sur.s.pitch div ColSize
+  var pitch = sur.s.pitch.int div ColSize
   if (r.x >= 0 and r.x <= sur.s.w) and (r.y >= 0 and r.y <= sur.s.h):
     var minW = min(sur.s.w - r.x, r.width - 1)
     var minH = min(sur.s.h - r.y, r.height - 1)
@@ -344,7 +345,7 @@ proc fillRect*(sur: PSurface, r: TRect, col: TColor) =
 
 proc Plot4EllipsePoints(sur: PSurface, CX, CY, X, Y: Natural, col: TColor) =
   var video = cast[PPixels](sur.s.pixels)
-  var pitch = sur.s.pitch div ColSize
+  var pitch = sur.s.pitch.int div ColSize
   if CX+X <= sur.s.w-1:
     if CY+Y <= sur.s.h-1: setPix(video, pitch, CX+X, CY+Y, col)
     if CY-Y <= sur.s.h-1: setPix(video, pitch, CX+X, CY-Y, col)    
@@ -408,14 +409,13 @@ proc drawEllipse*(sur: PSurface, CX, CY, XRadius, YRadius: Natural,
   
 
 proc plotAA(sur: PSurface, x, y: int, c: float, color: TColor) =
-  if (x > 0 and x < sur.s.w) and (y > 0 and 
-      y < sur.s.h):
+  if (x > 0 and x < sur.s.w) and (y > 0 and y < sur.s.h):
     var video = cast[PPixels](sur.s.pixels)
-    var pitch = sur.s.pitch div ColSize
+    var pitch = sur.s.pitch.int div ColSize
 
     var pixColor = getPix(video, pitch, x, y)
 
-    setPix(video, pitch, x, y, 
+    setPix(video, pitch, x, y,
            pixColor.intensity(1.0 - c) + color.intensity(c))
  
 
@@ -560,7 +560,7 @@ when isMainModule:
     else:
       #echo(event.kind)
       
-    SDL.UpdateRect(surf.s, int32(0), int32(0), int32(800), int32(600))
+    SDL.UpdateRect(surf.s, 0, 0, 800, 600)
     
   surf.writeToBMP("test.bmp")
   SDL.Quit()

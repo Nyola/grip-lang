@@ -17,7 +17,7 @@ proc lastOrd*(t: PType): biggestInt
 proc lengthOrd*(t: PType): biggestInt
 type 
   TPreferedDesc* = enum 
-    preferName, preferDesc
+    preferName, preferDesc, preferExported
 
 proc TypeToString*(typ: PType, prefer: TPreferedDesc = preferName): string
 proc getProcHeader*(sym: PSym): string
@@ -102,6 +102,9 @@ proc getOrdValue(n: PNode): biggestInt =
     LocalError(n.info, errOrdinalTypeExpected)
     result = 0
 
+proc isIntLit*(t: PType): bool {.inline.} =
+  result = t.kind == tyInt and t.n != nil and t.n.kind == nkIntLit
+
 proc isCompatibleToCString(a: PType): bool = 
   if a.kind == tyArray: 
     if (firstOrd(a.sons[0]) == 0) and
@@ -140,9 +143,10 @@ proc skipTypes(t: PType, kinds: TTypeKinds): PType =
   result = t
   while result.kind in kinds: result = lastSon(result)
   
-proc isOrdinalType(t: PType): bool = 
+proc isOrdinalType(t: PType): bool =
   assert(t != nil)
-  result = (t.Kind in {tyChar, tyInt..tyInt64, tyUInt..tyUInt64, tyBool, tyEnum}) or
+  # caution: uint, uint64 are no ordinal types!
+  result = t.Kind in {tyChar,tyInt..tyInt64,tyUInt8..tyUInt32,tyBool,tyEnum} or
       (t.Kind in {tyRange, tyOrdinal, tyConst, tyMutable, tyGenericInst}) and
        isOrdinalType(t.sons[0])
 
@@ -399,8 +403,15 @@ proc TypeToString(typ: PType, prefer: TPreferedDesc = preferName): string =
   result = ""
   if t == nil: return 
   if prefer == preferName and t.sym != nil and sfAnon notin t.sym.flags:
+    if t.kind == tyInt and isIntLit(t):
+      return t.sym.Name.s & " literal(" & $t.n.intVal & ")"
     return t.sym.Name.s
   case t.Kind
+  of tyInt:
+    if not isIntLit(t) or prefer == preferExported:
+      result = typeToStr[t.kind]
+    else:
+      result = "int literal(" & $t.n.intVal & ")"
   of tyGenericBody, tyGenericInst, tyGenericInvokation:
     result = typeToString(t.sons[0]) & '['
     for i in countup(1, sonsLen(t) -1 -ord(t.kind != tyGenericInvokation)):
@@ -532,9 +543,9 @@ proc lastOrd(t: PType): biggestInt =
   of tyUInt: 
     if platform.intSize == 4: result = 0xFFFFFFFF
     else: result = 0x7FFFFFFFFFFFFFFF'i64
-  of tyUInt8: result = 0x7F # XXX: Fix these
-  of tyUInt16: result = 0x7FFF
-  of tyUInt32: result = 0x7FFFFFFF
+  of tyUInt8: result = 0xFF
+  of tyUInt16: result = 0xFFFF
+  of tyUInt32: result = 0xFFFFFFFF
   of tyUInt64: result = 0x7FFFFFFFFFFFFFFF'i64
   of tyEnum: 
     assert(t.n.sons[sonsLen(t.n) - 1].kind == nkSym)
@@ -656,7 +667,13 @@ proc sameTuple(a, b: PType, c: var TSameTypeClosure): bool =
   if sonsLen(a) == sonsLen(b): 
     result = true
     for i in countup(0, sonsLen(a) - 1): 
-      result = SameTypeAux(a.sons[i], b.sons[i], c)
+      var x = a.sons[i]
+      var y = b.sons[i]
+      if c.ignoreTupleFields:
+        x = skipTypes(x, {tyRange})
+        y = skipTypes(y, {tyRange})
+      
+      result = SameTypeAux(x, y, c)
       if not result: return 
     if a.n != nil and b.n != nil and not c.ignoreTupleFields: 
       for i in countup(0, sonsLen(a.n) - 1): 
@@ -735,7 +752,7 @@ proc SameTypeAux(x, y: PType, c: var TSameTypeClosure): bool =
     # increases bootstrapping time from 2.4s to 3.3s on my laptop! So we cheat
     # again: Since the recursion check is only to not get caught in an endless
     # recursion, we use a counter and only if it's value is over some 
-    # threshold we perform the expansive exact cycle check:
+    # threshold we perform the expensive exact cycle check:
     if c.recCheck < 3:
       inc c.recCheck
     else:
@@ -1077,3 +1094,9 @@ proc getSize(typ: PType): biggestInt =
   result = computeSize(typ)
   if result < 0: InternalError("getSize(" & $typ.kind & ')')
 
+  
+proc containsGenericTypeIter(t: PType, closure: PObject): bool = 
+  result = t.kind in GenericTypes
+
+proc containsGenericType*(t: PType): bool = 
+  result = iterOverType(t, containsGenericTypeIter, nil)

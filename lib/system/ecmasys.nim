@@ -7,7 +7,11 @@
 #    distribution, for details about the copyright.
 #
 
-proc alert*(s: cstring) {.importc, nodecl.}
+when defined(nodejs):
+  proc alert*(s: cstring) {.importc: "console.log", nodecl.}
+else:
+  proc alert*(s: cstring) {.importc, nodecl.}
+
 proc log*(s: cstring) {.importc: "console.log", nodecl.}
 
 type
@@ -85,7 +89,10 @@ proc raiseException(e: ref E_Base, ename: cstring) {.
   if excHandler != nil:
     excHandler.exc = e
   else:
-    var buf = rawWriteStackTrace()
+    when nimrodStackTrace:
+      var buf = rawWriteStackTrace()
+    else:
+      var buf = ""
     if e.msg != nil and e.msg[0] != '\0':
       add(buf, "Error: unhandled exception: ")
       add(buf, e.msg)
@@ -97,7 +104,7 @@ proc raiseException(e: ref E_Base, ename: cstring) {.
     alert(buf)
   asm """throw `e`;"""
 
-proc reraiseException() =
+proc reraiseException() {.compilerproc, noStackFrame.} =
   if excHandler == nil:
     raise newException(ENoExceptionToReraise, "no exception to reraise")
   else:
@@ -292,27 +299,40 @@ type
     setAttribute*: proc (name, value: cstring)
     setAttributeNode*: proc (attr: ref TNode)
     
-var
-  document {.importc, nodecl.}: ref TDocument
+when defined(nodejs):
+  proc ewriteln(x: cstring) = log(x)
+  
+  proc rawEcho {.compilerproc, nostackframe.} =
+    asm """
+      var buf = "";
+      for (var i = 0; i < arguments.length; ++i) {
+        buf += `toEcmaStr`(arguments[i]);
+      }
+      console.log(buf);
+    """
 
-proc ewriteln(x: cstring) = 
-  var node = document.getElementsByTagName("body")[0]
-  if node != nil: 
-    node.appendChild(document.createTextNode(x))
+else:
+  var
+    document {.importc, nodecl.}: ref TDocument
+
+  proc ewriteln(x: cstring) = 
+    var node = document.getElementsByTagName("body")[0]
+    if node != nil: 
+      node.appendChild(document.createTextNode(x))
+      node.appendChild(document.createElement("br"))
+    else: 
+      raise newException(EInvalidValue, "<body> element does not exist yet!")
+
+  proc rawEcho {.compilerproc.} =
+    var node = document.getElementsByTagName("body")[0]
+    if node == nil: raise newException(EIO, "<body> element does not exist yet!")
+    asm """
+      for (var i = 0; i < arguments.length; ++i) {
+        var x = `toEcmaStr`(arguments[i]);
+        `node`.appendChild(document.createTextNode(x))
+      }
+    """
     node.appendChild(document.createElement("br"))
-  else: 
-    raise newException(EInvalidValue, "<body> element does not exist yet!")
-
-proc rawEcho {.compilerproc.} =
-  var node = document.getElementsByTagName("body")[0]
-  if node == nil: raise newException(EIO, "<body> element does not exist yet!")
-  asm """
-    for (var i = 0; i < arguments.length; ++i) {
-      var x = `toEcmaStr`(arguments[i]);
-      `node`.appendChild(document.createTextNode(x))
-    }
-  """
-  node.appendChild(document.createElement("br"))
 
 # Arithmetic:
 proc addInt(a, b: int): int {.noStackFrame, compilerproc.} =
@@ -388,6 +408,76 @@ proc modInt64(a, b: int): int {.noStackFrame, compilerproc.} =
     return Math.floor(`a` % `b`);
   """
 
+proc NegInt(a: int): int {.compilerproc.} =
+  result = a*(-1)
+
+proc NegInt64(a: int64): int64 {.compilerproc.} =
+  result = a*(-1)
+
+proc AbsInt(a: int): int {.compilerproc.} =
+  result = if a < 0: a*(-1) else: a
+
+proc AbsInt64(a: int64): int64 {.compilerproc.} =
+  result = if a < 0: a*(-1) else: a
+
+proc LeU(a, b: int): bool {.compilerproc.} =
+  result = abs(a) <= abs(b)
+
+proc LtU(a, b: int): bool {.compilerproc.} =
+  result = abs(a) < abs(b)
+
+proc LeU64(a, b: int64): bool {.compilerproc.} =
+  result = abs(a) <= abs(b)
+
+proc LtU64(a, b: int64): bool {.compilerproc.} =
+  result = abs(a) < abs(b)
+
+proc AddU(a, b: int): int {.compilerproc.} =
+  result = abs(a) + abs(b)
+proc AddU64(a, b: int64): int64 {.compilerproc.} =
+  result = abs(a) + abs(b)
+
+proc SubU(a, b: int): int {.compilerproc.} =
+  result = abs(a) - abs(b)
+proc SubU64(a, b: int64): int64 {.compilerproc.} =
+  result = abs(a) - abs(b)
+
+proc MulU(a, b: int): int {.compilerproc.} =
+  result = abs(a) * abs(b)
+proc MulU64(a, b: int64): int64 {.compilerproc.} =
+  result = abs(a) * abs(b)
+
+proc DivU(a, b: int): int {.compilerproc.} =
+  result = abs(a) div abs(b)
+proc DivU64(a, b: int64): int64 {.compilerproc.} =
+  result = abs(a) div abs(b)
+
+proc ModU(a, b: int): int {.compilerproc.} =
+  result = abs(a) mod abs(b)
+proc ModU64(a, b: int64): int64 {.compilerproc.} =
+  result = abs(a) mod abs(b)
+
+proc Ze(a: int): int {.compilerproc.} =
+  result = a
+proc Ze64(a: int64): int64 {.compilerproc.} =
+  result = a
+
+proc toU8(a: int): int8 {.noStackFrame, compilerproc.} =
+  asm """
+    return `a`;
+  """
+
+proc toU16(a: int): int16 {.noStackFrame, compilerproc.} =
+  asm """
+    return `a`;
+  """
+
+proc toU32(a: int): int32 {.noStackFrame, compilerproc.} =
+  asm """
+    return `a`;
+  """
+
+
 proc nimMin(a, b: int): int {.compilerproc.} = return if a <= b: a else: b
 proc nimMax(a, b: int): int {.compilerproc.} = return if a >= b: a else: b
 
@@ -401,7 +491,7 @@ proc isFatPointer(ti: PNimType): bool =
 
 proc NimCopy(x: pointer, ti: PNimType): pointer {.compilerproc.}
 
-proc NimCopyAux(dest, src: Pointer, n: ptr TNimNode) {.exportc.} =
+proc NimCopyAux(dest, src: Pointer, n: ptr TNimNode) {.compilerproc.} =
   case n.kind
   of nkNone: sysAssert(false, "NimCopyAux")
   of nkSlot:
@@ -452,6 +542,37 @@ proc NimCopy(x: pointer, ti: PNimType): pointer =
   else:
     result = x
 
+proc genericReset(x: Pointer, ti: PNimType): pointer {.compilerproc.} =
+  case ti.kind
+  of tyPtr, tyRef, tyVar, tyNil:
+    if not isFatPointer(ti):
+      result = nil
+    else:
+      asm """
+        `result` = [null, 0];
+      """
+  of tySet:
+    asm """
+      `result` = {};
+    """
+  of tyTuple, tyObject:
+    if ti.kind == tyObject:
+      asm "`result` = {m_type: `ti`};"
+    else:
+      asm "`result` = {};"
+  of tySequence, tyOpenArray:
+    asm """
+      `result` = [];
+    """
+  of tyArrayConstr, tyArray:
+    asm """
+      `result` = new Array(`x`.length);
+      for (var i = 0; i < `x`.length; ++i) {
+        `result`[i] = genericReset(`x`[i], `ti`.base);
+      }
+    """
+  else:
+    result = nil
 
 proc ArrayConstr(len: int, value: pointer, typ: PNimType): pointer {.
                  noStackFrame, compilerproc.} =
@@ -479,29 +600,13 @@ proc chckObj(obj, subclass: PNimType) {.compilerproc.} =
       raise newException(EInvalidObjectConversion, "invalid object conversion")
     x = x.base
 
+proc isObj(obj, subclass: PNimType): bool {.compilerproc.} =
+  # checks if obj is of type subclass:
+  var x = obj
+  if x == subclass: return true # optimized fast path
+  while x != subclass:
+    if x == nil: return false
+    x = x.base
+  return true
+
 {.pop.}
-
-#proc AddU($1, $2)
-#SubU($1, $2)
-#MulU($1, $2)
-#DivU($1, $2)
-#ModU($1, $2)
-#AddU64($1, $2)
-#SubU64($1, $2)
-#MulU64($1, $2)
-#DivU64($1, $2)
-#ModU64($1, $2)
-#LeU($1, $2)
-#LtU($1, $2)
-#LeU64($1, $2)
-#LtU64($1, $2)
-#Ze($1)
-#Ze64($1)
-#ToU8($1)
-#ToU16($1)
-#ToU32($1)
-
-#NegInt($1)
-#NegInt64($1)
-#AbsInt($1)
-#AbsInt64($1)

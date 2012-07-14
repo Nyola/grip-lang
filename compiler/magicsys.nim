@@ -24,7 +24,7 @@ proc FinishSystem*(tab: TStrTable)
 proc getSysSym*(name: string): PSym
 # implementation
 
-var 
+var
   gSysTypes: array[TTypeKind, PType]
   compilerprocs: TStrTable
 
@@ -73,7 +73,63 @@ proc getSysType(kind: TTypeKind): PType =
   if result.kind != kind: 
     InternalError("wanted: " & $kind & " got: " & $result.kind)
   if result == nil: InternalError("type not found: " & $kind)
-  
+
+var
+  intTypeCache: array[-5..64, PType]
+
+proc getIntLitType*(literal: PNode): PType =
+  # we cache some common integer literal types for performance:
+  let value = literal.intVal
+  if value >= low(intTypeCache) and value <= high(intTypeCache):
+    result = intTypeCache[value.int]
+    if result == nil:
+      let ti = getSysType(tyInt)
+      result = copyType(ti, ti.owner, false)
+      result.n = literal
+      intTypeCache[value.int] = result
+  else:
+    let ti = getSysType(tyInt)
+    result = copyType(ti, ti.owner, false)
+    result.n = literal
+
+proc skipIntLit*(t: PType): PType {.inline.} =
+  if t.kind == tyInt and t.n != nil:
+    result = getSysType(tyInt)
+  else:
+    result = t
+
+proc AddSonSkipIntLit*(father, son: PType) =
+  if isNil(father.sons): father.sons = @[]
+  add(father.sons, son.skipIntLit)
+
+proc setIntLitType*(result: PNode) =
+  let i = result.intVal
+  case platform.IntSize
+  of 8: result.typ = getIntLitType(result)
+  of 4:
+    if i >= low(int32) and i <= high(int32):
+      result.typ = getIntLitType(result)
+    else:
+      result.typ = getSysType(tyInt64)
+  of 2:
+    if i >= low(int16) and i <= high(int16):
+      result.typ = getIntLitType(result)
+    elif i >= low(int32) and i <= high(int32):
+      result.typ = getSysType(tyInt32)
+    else:
+      result.typ = getSysType(tyInt64)
+  of 1:
+    # 8 bit CPUs are insane ...
+    if i >= low(int8) and i <= high(int8):
+      result.typ = getIntLitType(result)
+    elif i >= low(int16) and i <= high(int16):
+      result.typ = getSysType(tyInt16)
+    elif i >= low(int32) and i <= high(int32):
+      result.typ = getSysType(tyInt32)
+    else:
+      result.typ = getSysType(tyInt64)
+  else: InternalError(result.info, "invalid int size")
+
 proc getCompilerProc(name: string): PSym = 
   var ident = getIdent(name, hashIgnoreStyle(name))
   result = StrTableGet(compilerprocs, ident)

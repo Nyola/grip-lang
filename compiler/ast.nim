@@ -225,7 +225,8 @@ type
     sfMainModule,     # module is the main module
     sfSystemModule,   # module is the system module
     sfNoReturn,       # proc never returns (an exit proc)
-    sfAddrTaken,      # the variable's address is taken (ex- or implicitely)
+    sfAddrTaken,      # the variable's address is taken (ex- or implicitely);
+                      # *OR*: a proc is indirectly called (used as first class)
     sfCompilerProc,   # proc is a compiler proc, that is a C proc that is
                       # needed for the code generator
     sfProcvar,        # proc can be passed to a proc var
@@ -245,6 +246,7 @@ type
                       # language; for interfacing with Objective C
     sfDiscardable     # returned value may be discarded implicitely
     sfDestructor      # proc is destructor
+    sfByCopy          # a variable is to be captured by value in a closure
 
   TSymFlags* = set[TSymFlag]
 
@@ -264,9 +266,6 @@ const
   
   sfShadowed* = sfInnerProc
     # a variable that was shadowed in some inner scope
-
-  sfByCopy* = sfBorrow
-    # a variable is to be captured by value in a closure
     
   sfHoist* = sfVolatile ## proc return value can be hoisted
 
@@ -335,12 +334,10 @@ type
     tfEnumHasHoles,   # enum cannot be mapped into a range
     tfShallow,        # type can be shallow copied on assignment
     tfThread,         # proc type is marked as ``thread``
-    tfUniIntLit       # type represents literal value that could be either
-                      # singed or unsigned integer (e.g. 100)
-    tfFromGeneric     # type is an instantiation of a generic; this is needed
+    tfFromGeneric,    # type is an instantiation of a generic; this is needed
                       # because for instantiations of objects, structural
                       # type equality has to be used
-    tfAll             # type class requires all constraints to be met (default)
+    tfAll,            # type class requires all constraints to be met (default)
     tfAny             # type class requires any constraint to be met
 
   TTypeFlags* = set[TTypeFlag]
@@ -590,6 +587,7 @@ type
                               # for range types a nkRange node
                               # for record types a nkRecord node
                               # for enum types a list of symbols
+                              # for tyInt it can be the int literal
                               # else: unused
     destructor*: PSym         # destructor. warning: nil here may not necessary
                               # mean that there is no destructor.
@@ -721,7 +719,6 @@ proc lastSon*(n: PType): PType {.inline.}
 proc newSons*(father: PNode, length: int)
 proc newSons*(father: PType, length: int)
 proc addSon*(father, son: PNode)
-proc addSon*(father, son: PType)
 proc delSon*(father: PNode, idx: int)
 proc hasSonWith*(n: PNode, kind: TNodeKind): bool
 proc hasSubnodeWith*(n: PNode, kind: TNodeKind): bool
@@ -999,11 +996,6 @@ proc newSons(father: PType, length: int) =
   else:
     setlen(father.sons, length)
 
-proc addSon(father, son: PType) = 
-  if isNil(father.sons): father.sons = @[]
-  add(father.sons, son)
-  #assert((father.kind != tyGenericInvokation) or (son.kind != tyGenericInst))
-
 proc sonsLen(n: PNode): int = 
   if isNil(n.sons): result = 0
   else: result = len(n.sons)
@@ -1013,6 +1005,15 @@ proc newSons(father: PNode, length: int) =
     newSeq(father.sons, length)
   else:
     setlen(father.sons, length)
+
+proc addSon*(father, son: PType) {.deprecated.} =
+  if isNil(father.sons): father.sons = @[]
+  add(father.sons, son)
+  #assert((father.kind != tyGenericInvokation) or (son.kind != tyGenericInst))
+
+proc rawAddSon*(father, son: PType) =
+  if isNil(father.sons): father.sons = @[]
+  add(father.sons, son)
 
 proc addSon(father, son: PNode) = 
   assert son != nil

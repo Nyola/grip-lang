@@ -1,16 +1,16 @@
 version 0.9.0
 =============
 
-Debug GC session:
+- implicit deref for parameter matching
+- deprecate ``var x, y = 0`` as it's confusing for tuple consistency
 - test sequence of closures; especially that the GC does not leak for those!
 
 New pragmas:
 - ``hoist`` pragma for loop hoisting
-- test & document ``byCopy`` pragma
+- fix & document ``byCopy`` pragma
+- document destructors
 
 - ``borrow`` needs to take type classes into account
-- make templates hygienic by default: try to gensym() everything in the 'block'
-  of a template; find a better solution for gensym instead of `*ident`
 - make use of ``tyIter`` to fix the implicit items/pairs issue
 - ``=`` should be overloadable; requires specialization for ``=``
 - optimize genericAssign in the code generator
@@ -21,14 +21,11 @@ New pragmas:
   - implement "closure tuple consists of a single 'ref'" optimization
 
 - document 'do' notation
-- unsigned ints and bignums; requires abstract integer literal type: 
-  use tyInt+node for that
 - rethink the syntax: distinction between expr and stmt is unfortunate; 
   indentation handling is quite complex too; problem with exception handling
   is that often the scope of ``try`` is wrong and apart from that ``try`` is
   a full blown statement; a ``try`` expression might be a good idea to make
   error handling more light-weight
-  people also want ``inc a; inc b``
 
 
 Bugs
@@ -36,22 +33,26 @@ Bugs
 
 - bug: pragma statements in combination with symbol files are evaluated twice
   but this can lead to compilation errors
+- bug: the parser is not strict enough with newlines: 'echo "a" echo "b"' 
+  compiles
 
 
 version 0.9.XX
 ==============
 
+- JS gen:
+  - document it
+  - fix exception handling
+
+- make templates hygienic by default: try to gensym() everything in the 'block'
+  of a template; find a better solution for gensym instead of `*ident`
 - document nimdoc properly finally
+- make 'clamp' a magic for the range stuff
 - implement a warning message for shadowed 'result' variable
 - implement the high level optimizer
-- change overloading resolution
 - we need to support iteration of 2 different data structures in parallel
 - implement proper coroutines
-- implicit ref/ptr->var conversion; the compiler may store an object
-  implicitly on the heap for write barrier efficiency; better: 
-  proc specialization in the code gen
-- EcmaScript needs a new and better code gen: simply adapt the C code gen to it
-- dead code elim for JS backend; 'of' operator for JS backend
+- proc specialization in the code gen for write barrier specialization
 - tlastmod returns wrong results on BSD (Linux, MacOS X: works)
 - nested tuple unpacking; tuple unpacking in non-var-context
 - 'nimrod def': does not always work?
@@ -89,13 +90,6 @@ Library
 
 - pdcurses bindings
 
-- for system:
-  proc `@` [T](a: openArray[T]): seq[T] = 
-    newSeq(result, a.len)
-    for i in 0..a.len-1: result[i] = a[i]
-    
-  --> ensure @[] calls the array version!
-
 
 Low priority
 ------------
@@ -103,14 +97,14 @@ Low priority
 - change how comments are part of the AST
 - ``with proc `+`(x, y: T): T`` for generic code
 - new feature: ``distinct T with operations``
-- implement the "easy" constructors idea; document destructors
+- implement the "easy" constructors idea
 - code generated for type information is wasteful
 - resizing of strings/sequences could take into account the memory that
   is allocated
 - timeout for locks
 - compilation cache:
   - adapt thread var emulation to care about the new merge operation
-  - check for interface changes; if only the implemenation changes, no
+  - check for interface changes; if only the implementation changes, no
     need to recompile clients; er ... what about templates, macros or anything
     that has inlining semantics?
 - codegen should use "NIM_CAST" macro and respect aliasing rules for GCC
@@ -138,7 +132,6 @@ Further optimization ideas
 
 Version 2 and beyond
 ====================
-
 
 - shared memory heap: ``shared ref`` etc. The only hard part in the GC is to
   "stop the world". However, it may be worthwhile to generate explicit 

@@ -131,7 +131,7 @@ proc runGcTests(r: var TResults, options: string) =
   test "gctest"
   # disabled for now as it somehow runs very slowly ('delete' bug?) but works:
   test "gcleak3"
-  
+  test "weakrefs"
 
 # ------------------------- threading tests -----------------------------------
 
@@ -168,6 +168,22 @@ proc runIOTests(r: var TResults, options: string) =
 proc compileDebuggerTests(r: var TResults, options: string) =
   compileSingleTest(r, "tools/nimgrep", options & 
                     " --debugger:on")
+
+# ------------------------- JS tests ------------------------------------------
+
+proc runJsTests(r: var TResults, options: string) =
+  template test(filename: expr): stmt =
+    runSingleTest(r, filename, options & " -d:nodejs", targetJS)
+    runSingleTest(r, filename, options & " -d:nodejs -d:release", targetJS)
+    
+  # texceptions, texcpt1, texcsub, tfinally, tfinally2,
+  # tfinally3
+  for t in os.walkFiles("tests/js/t*.nim"):
+    test(t)
+  test "tests/run/tactiontable"
+  test "tests/run/tmultim1"
+  test "tests/run/tmultim3"
+  test "tests/run/tmultim4"
 
 # ------------------------- register special tests here -----------------------
 proc runSpecialTests(r: var TResults, options: string) =

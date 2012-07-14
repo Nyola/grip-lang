@@ -42,11 +42,11 @@
 --file:r"compiler/nimcache/renderer.c"
 --file:r"compiler/nimcache/filter_tmpl.c"
 --file:r"compiler/nimcache/rodread.c"
+--file:r"compiler/nimcache/types.c"
+--file:r"compiler/nimcache/trees.c"
 --file:r"compiler/nimcache/memfiles.c"
 --file:r"compiler/nimcache/rodwrite.c"
 --file:r"compiler/nimcache/passes.c"
---file:r"compiler/nimcache/types.c"
---file:r"compiler/nimcache/trees.c"
 --file:r"compiler/nimcache/magicsys.c"
 --file:r"compiler/nimcache/nimsets.c"
 --file:r"compiler/nimcache/bitsets.c"
@@ -57,8 +57,10 @@
 --file:r"compiler/nimcache/treetab.c"
 --file:r"compiler/nimcache/evals.c"
 --file:r"compiler/nimcache/semfold.c"
+--file:r"compiler/nimcache/saturate.c"
 --file:r"compiler/nimcache/transf.c"
 --file:r"compiler/nimcache/cgmeth.c"
+--file:r"compiler/nimcache/lambdalifting.c"
 --file:r"compiler/nimcache/sem.c"
 --file:r"compiler/nimcache/procfind.c"
 --file:r"compiler/nimcache/pragmas.c"
@@ -78,6 +80,7 @@
 --file:r"compiler/nimcache/ecmasgen.c"
 --file:r"compiler/nimcache/passaux.c"
 --file:r"compiler/nimcache/depends.c"
+--file:r"compiler/nimcache/docgen2.c"
 --file:r"compiler/nimcache/parseopt.c"
 
 [C_Compiler]
@@ -85,5 +88,5 @@ Flags="-w -O3 -fno-strict-aliasing"
 [Linker]
 Flags="-ldl -lm"
 [Environment]
-libpath="/Volumes/home/zahary/Projects/nim/lib"
+libpath="/home/andreas/projects/nimrod/lib"
 [Symbols]

@@ -343,7 +343,7 @@ proc bindAddr*(socket: TSocket, port = TPort(0), address = "") =
     name.sin_port = sockets.htons(int16(port))
     name.sin_addr.s_addr = sockets.htonl(INADDR_ANY)
     if bindSocket(socket.fd, cast[ptr TSockAddr](addr(name)),
-                  sizeof(name)) < 0'i32:
+                  sizeof(name).TSockLen) < 0'i32:
       OSError()
   else:
     var hints: TAddrInfo
@@ -352,7 +352,7 @@ proc bindAddr*(socket: TSocket, port = TPort(0), address = "") =
     hints.ai_socktype = toInt(SOCK_STREAM)
     hints.ai_protocol = toInt(IPPROTO_TCP)
     gaiNim(address, port, hints, aiList)
-    if bindSocket(socket.fd, aiList.ai_addr, aiList.ai_addrLen) < 0'i32:
+    if bindSocket(socket.fd, aiList.ai_addr, aiList.ai_addrLen.cint) < 0'i32:
       OSError()
 
 when false:
@@ -366,7 +366,7 @@ when false:
     name.sin_port = sockets.htons(int16(port))
     name.sin_addr.s_addr = sockets.htonl(INADDR_ANY)
     if bindSocket(cint(socket), cast[ptr TSockAddr](addr(name)),
-                  sizeof(name)) < 0'i32:
+                  sizeof(name).TSockLen) < 0'i32:
       OSError()
   
 proc getSockName*(socket: TSocket): TPort = 
@@ -378,7 +378,7 @@ proc getSockName*(socket: TSocket): TPort =
     name.sin_family = posix.AF_INET
   #name.sin_port = htons(cint16(port))
   #name.sin_addr.s_addr = htonl(INADDR_ANY)
-  var namelen: cint = sizeof(name)
+  var namelen = sizeof(name).TSockLen
   if getsockname(socket.fd, cast[ptr TSockAddr](addr(name)),
                  addr(namelen)) == -1'i32:
     OSError()
@@ -398,7 +398,7 @@ proc acceptAddr*(server: TSocket): tuple[client: TSocket, address: string] =
   ## **Warning:** This function might block even if socket is non-blocking
   ## when using SSL.
   var sockAddress: Tsockaddr_in
-  var addrLen: cint = sizeof(sockAddress)
+  var addrLen = sizeof(sockAddress).TSockLen
   var sock = accept(server.fd, cast[ptr TSockAddr](addr(sockAddress)),
                     addr(addrLen))
   
@@ -477,9 +477,9 @@ proc getServByName*(name, proto: string): TServent =
 proc getServByPort*(port: TPort, proto: string): TServent = 
   ## well-known getservbyport proc.
   when defined(Windows):
-    var s = winlean.getservbyport(ze(int16(port)), proto)
+    var s = winlean.getservbyport(ze(int16(port)).cint, proto)
   else:
-    var s = posix.getservbyport(ze(int16(port)), proto)
+    var s = posix.getservbyport(ze(int16(port)).cint, proto)
   if s == nil: OSError()
   result.name = $s.s_name
   result.aliases = cstringArrayToSeq(s.s_aliases)
@@ -492,11 +492,11 @@ proc getHostByAddr*(ip: string): THostEnt =
   myaddr.s_addr = inet_addr(ip)
   
   when defined(windows):
-    var s = winlean.gethostbyaddr(addr(myaddr), sizeof(myaddr),
+    var s = winlean.gethostbyaddr(addr(myaddr), sizeof(myaddr).cint,
                                   cint(sockets.AF_INET))
     if s == nil: OSError()
   else:
-    var s = posix.gethostbyaddr(addr(myaddr), sizeof(myaddr), 
+    var s = posix.gethostbyaddr(addr(myaddr), sizeof(myaddr).cint, 
                                 cint(posix.AF_INET))
     if s == nil:
       raise newException(EOS, $hStrError(h_errno))
@@ -539,7 +539,7 @@ proc getHostByName*(name: string): THostEnt =
 proc getSockOptInt*(socket: TSocket, level, optname: int): int = 
   ## getsockopt for integer options.
   var res: cint
-  var size: cint = sizeof(res)
+  var size = sizeof(res).cint
   if getsockopt(socket.fd, cint(level), cint(optname), 
                 addr(res), addr(size)) < 0'i32:
     OSError()
@@ -549,7 +549,7 @@ proc setSockOptInt*(socket: TSocket, level, optname, optval: int) =
   ## setsockopt for integer options.
   var value = cint(optval)
   if setsockopt(socket.fd, cint(level), cint(optname), addr(value),  
-                sizeof(value)) < 0'i32:
+                sizeof(value).cint) < 0'i32:
     OSError()
 
 proc connect*(socket: TSocket, name: string, port = TPort(0), 
@@ -570,7 +570,7 @@ proc connect*(socket: TSocket, name: string, port = TPort(0),
   var success = false
   var it = aiList
   while it != nil:
-    if connect(socket.fd, it.ai_addr, it.ai_addrlen) == 0'i32:
+    if connect(socket.fd, it.ai_addr, it.ai_addrlen.cint) == 0'i32:
       success = true
       break
     it = it.ai_next
@@ -608,7 +608,7 @@ proc connect*(socket: TSocket, name: string, port = TPort(0),
       of AF_INET: s.sin_family = posix.AF_INET
       of AF_INET6: s.sin_family = posix.AF_INET6
       else: nil
-    if connect(socket.fd, cast[ptr TSockAddr](addr(s)), sizeof(s)) < 0'i32:
+    if connect(socket.fd, cast[ptr TSockAddr](addr(s)), sizeof(s).cint) < 0'i32:
       OSError()
 
 proc connectAsync*(socket: TSocket, name: string, port = TPort(0),
@@ -624,7 +624,7 @@ proc connectAsync*(socket: TSocket, name: string, port = TPort(0),
   var success = false
   var it = aiList
   while it != nil:
-    var ret = connect(socket.fd, it.ai_addr, it.ai_addrlen)
+    var ret = connect(socket.fd, it.ai_addr, it.ai_addrlen.cint)
     if ret == 0'i32:
       success = true
       break
@@ -669,8 +669,8 @@ proc connectAsync*(socket: TSocket, name: string, port = TPort(0),
 proc timeValFromMilliseconds(timeout = 500): TTimeVal =
   if timeout != -1:
     var seconds = timeout div 1000
-    result.tv_sec = seconds
-    result.tv_usec = (timeout - seconds * 1000) * 1000
+    result.tv_sec = seconds.int32
+    result.tv_usec = ((timeout - seconds * 1000) * 1000).int32
 #proc recvfrom*(s: TWinSocket, buf: cstring, len, flags: cint, 
 #               fromm: ptr TSockAddr, fromlen: ptr cint): cint 
 
@@ -772,9 +772,9 @@ proc readIntoBuf(socket: TSocket, flags: int32): int =
     if socket.isSSL:
       result = SSLRead(socket.sslHandle, addr(socket.buffer), int(socket.buffer.high))
     else:
-      result = recv(socket.fd, addr(socket.buffer), int(socket.buffer.high), flags)
+      result = recv(socket.fd, addr(socket.buffer), cint(socket.buffer.high), flags)
   else:
-    result = recv(socket.fd, addr(socket.buffer), int(socket.buffer.high), flags)
+    result = recv(socket.fd, addr(socket.buffer), cint(socket.buffer.high), flags)
   if result <= 0:
     socket.buflen = 0
     socket.currPos = 0
@@ -824,9 +824,9 @@ proc recv*(socket: TSocket, data: pointer, size: int): int =
       if socket.isSSL:
         result = SSLRead(socket.sslHandle, data, size)
       else:
-        result = recv(socket.fd, data, size, 0'i32)
+        result = recv(socket.fd, data, size.cint, 0'i32)
     else:
-      result = recv(socket.fd, data, size, 0'i32)
+      result = recv(socket.fd, data, size.cint, 0'i32)
 
 proc waitFor(socket: TSocket, waited: var float, timeout: int): int =
   ## returns the number of characters available to be read. In unbuffered
@@ -1021,7 +1021,7 @@ proc recvAsync*(socket: TSocket, s: var TaintedString): bool =
     when defined(ssl):
       if socket.isSSL:
         if bytesRead <= 0:
-          var ret = SSLGetError(socket.sslHandle, bytesRead)
+          var ret = SSLGetError(socket.sslHandle, bytesRead.cint)
           case ret
           of SSL_ERROR_ZERO_RETURN:
             SSLError("TLS/SSL connection failed to initiate, socket closed prematurely.")
@@ -1068,7 +1068,7 @@ proc send*(socket: TSocket, data: pointer, size: int): int =
       return SSLWrite(socket.sslHandle, cast[cstring](data), size)
   
   when defined(windows) or defined(macosx):
-    result = send(socket.fd, data, size, 0'i32)
+    result = send(socket.fd, data, size.cint, 0'i32)
   else:
     result = send(socket.fd, data, size, int32(MSG_NOSIGNAL))
 
@@ -1088,7 +1088,7 @@ proc sendAsync*(socket: TSocket, data: string): bool =
   when defined(ssl):
     if socket.isSSL:
       if bytesSent <= 0:
-          let ret = SSLGetError(socket.sslHandle, bytesSent)
+          let ret = SSLGetError(socket.sslHandle, bytesSent.cint)
           case ret
           of SSL_ERROR_ZERO_RETURN:
             SSLError("TLS/SSL connection failed to initiate, socket closed prematurely.")

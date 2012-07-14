@@ -326,12 +326,27 @@ proc NameToCC*(name: string): TSystemCC =
       return i
   result = ccNone
 
+proc getConfigVar(c: TSystemCC, suffix: string): string =
+  # use ``cpu.os.cc`` for cross compilation, unless ``--compileOnly`` is given
+  # for niminst support
+  if (platform.hostOS != targetOS or platform.hostCPU != targetCPU) and
+      optCompileOnly notin gGlobalOptions:
+    let fullCCname = platform.cpu[targetCPU].name & '.' & 
+                     platform.os[targetOS].name & '.' & 
+                     CC[c].name & suffix
+    result = getConfigVar(fullCCname)
+    if result.len == 0:
+      # not overriden for this cross compilation setting?
+      result = getConfigVar(CC[c].name & suffix)
+  else:
+    result = getConfigVar(CC[c].name & suffix)
+
 proc setCC*(ccname: string) = 
   ccompiler = nameToCC(ccname)
   if ccompiler == ccNone: rawMessage(errUnknownCcompiler, ccname)
-  compileOptions = getConfigVar(CC[ccompiler].name & ".options.always")
-  linkOptions = getConfigVar(CC[ccompiler].name & ".options.linker")
-  ccompilerpath = getConfigVar(CC[ccompiler].name & ".path")
+  compileOptions = getConfigVar(ccompiler, ".options.always")
+  linkOptions = getConfigVar(ccompiler, ".options.linker")
+  ccompilerpath = getConfigVar(ccompiler, ".path")
   for i in countup(low(CC), high(CC)): undefSymbol(CC[i].name)
   defineSymbol(CC[ccompiler].name)
 
@@ -352,10 +367,10 @@ proc initVars*() =
   defineSymbol(CC[ccompiler].name)
   if gCmd == cmdCompileToCpp: cExt = ".cpp"
   elif gCmd == cmdCompileToOC: cExt = ".m"
-  addCompileOption(getConfigVar(CC[ccompiler].name & ".options.always"))
-  addLinkOption(getConfigVar(CC[ccompiler].name & ".options.linker"))
-  if len(ccompilerPath) == 0: 
-    ccompilerpath = getConfigVar(CC[ccompiler].name & ".path")
+  addCompileOption(getConfigVar(ccompiler, ".options.always"))
+  addLinkOption(getConfigVar(ccompiler, ".options.linker"))
+  if len(ccompilerPath) == 0:
+    ccompilerpath = getConfigVar(ccompiler, ".path")
 
 proc completeCFilePath*(cfile: string, createSubDir: bool = true): string = 
   result = completeGeneratedFilePath(cfile, createSubDir)
@@ -408,18 +423,18 @@ proc generateScript(projectFile: string, script: PRope) =
                                      platform.os[targetOS].scriptExt))
 
 proc getOptSpeed(c: TSystemCC): string = 
-  result = getConfigVar(cc[c].name & ".options.speed")
-  if result == "": 
+  result = getConfigVar(c, ".options.speed")
+  if result == "":
     result = cc[c].optSpeed   # use default settings from this file
 
 proc getDebug(c: TSystemCC): string = 
-  result = getConfigVar(cc[c].name & ".options.debug")
-  if result == "": 
+  result = getConfigVar(c, ".options.debug")
+  if result == "":
     result = cc[c].debug      # use default settings from this file
 
 proc getOptSize(c: TSystemCC): string = 
-  result = getConfigVar(cc[c].name & ".options.size")
-  if result == "": 
+  result = getConfigVar(c, ".options.size")
+  if result == "":
     result = cc[c].optSize    # use default settings from this file
 
 proc noAbsolutePaths: bool {.inline.} =
@@ -466,13 +481,17 @@ proc getLinkOptions: string =
   for libDir in items(cLibs):
     result.add cc[ccompiler].linkDirCmd, libDir.quoteIfContainsWhite
 
+proc needsExeExt(): bool {.inline.} =
+  result = (optGenScript in gGlobalOptions and targetOS == osWindows) or
+                                       (platform.hostOS == osWindows)
+
 proc getCompileCFileCmd*(cfilename: string, isExternal = false): string = 
   var c = ccompiler
   var options = CFileSpecificOptions(cfilename)
-  var exe = cc[c].compilerExe
-  var key = cc[c].name & ".exe"
-  if existsConfigVar(key): exe = getConfigVar(key)
-  if targetOS == osWindows: exe = addFileExt(exe, "exe")
+  var exe = getConfigVar(c, ".exe")
+  if exe.len == 0: exe = cc[c].compilerExe
+  
+  if needsExeExt(): exe = addFileExt(exe, "exe")
   if optGenDynLib in gGlobalOptions and
       ospNeedsPIC in platform.OS[targetOS].props: 
     add(options, ' ' & cc[c].pic)
@@ -490,10 +509,12 @@ proc getCompileCFileCmd*(cfilename: string, isExternal = false): string =
     includeCmd = ""
     compilePattern = cc[c].compilerExe
   
-  # XXX fix the grammar finally, we need multi-line if expressions:
-  var cfile = if noAbsolutePaths(): extractFileName(cfilename) else: cfilename
-  var objfile = if not isExternal or noAbsolutePaths(): toObjFile(
-                      cfile) else: completeCFilePath(toObjFile(cfile))
+  var cfile = if noAbsolutePaths(): extractFileName(cfilename) 
+              else: cfilename
+  var objfile = if not isExternal or noAbsolutePaths(): 
+                  toObjFile(cfile) 
+                else: 
+                  completeCFilePath(toObjFile(cfile))
   cfile = quoteIfContainsWhite(AddFileExt(cfile, cExt))
   objfile = quoteIfContainsWhite(objfile)
   result = quoteIfContainsWhite(compilePattern % [
@@ -559,9 +580,9 @@ proc CallCCompiler*(projectfile: string) =
                                   "objfiles", objfiles]
       if optCompileOnly notin gGlobalOptions: execExternalProgram(linkCmd)
     else:
-      var linkerExe = getConfigVar(cc[c].name & ".linkerexe")
+      var linkerExe = getConfigVar(c, ".linkerexe")
       if len(linkerExe) == 0: linkerExe = cc[c].linkerExe
-      if targetOS == osWindows: linkerExe = addFileExt(linkerExe, "exe")
+      if needsExeExt(): linkerExe = addFileExt(linkerExe, "exe")
       if noAbsolutePaths(): linkCmd = quoteIfContainsWhite(linkerExe)
       else: linkCmd = quoteIfContainsWhite(JoinPath(ccompilerpath, linkerExe))
       if optGenGuiApp in gGlobalOptions: buildGui = cc[c].buildGui

@@ -105,7 +105,7 @@ type
     warnSmallLshouldNotBeUsed, warnUnknownMagic, warnRedefinitionOfLabel, 
     warnUnknownSubstitutionX, warnLanguageXNotSupported, warnCommentXIgnored, 
     warnXisPassedToProcVar, warnAnalysisLoophole,
-    warnDifferentHeaps, warnWriteToForeignHeap,
+    warnDifferentHeaps, warnWriteToForeignHeap, warnImplicitNarrowing,
     warnUser, 
     hintSuccess, hintSuccessX, 
     hintLineTooLong, hintXDeclaredButNotUsed, hintConvToBaseNotNeeded, 
@@ -254,7 +254,7 @@ const
     errWrongNumberOfArguments: "wrong number of arguments", 
     errXCannotBePassedToProcVar: "\'$1\' cannot be passed to a procvar", 
     errXCannotBeInParamDecl: "$1 cannot be declared in parameter declaration", 
-    errPragmaOnlyInHeaderOfProc: "pragmas are only in the header of a proc allowed", 
+    errPragmaOnlyInHeaderOfProc: "pragmas are only allowed in the header of a proc", 
     errImplOfXNotAllowed: "implementation of \'$1\' is not allowed", 
     errImplOfXexpected: "implementation of \'$1\' expected", 
     errNoSymbolToBorrowFromFound: "no symbol to borrow from found", 
@@ -278,7 +278,7 @@ const
     errInvalidParamKindX: "invalid param kind: \'$1\'", 
     errDefaultArgumentInvalid: "default argument invalid", 
     errNamedParamHasToBeIdent: "named parameter has to be an identifier", 
-    errNoReturnTypeForX: "no return type for $1 allowed", 
+    errNoReturnTypeForX: "no return type allowed for $1", 
     errConvNeedsOneArg: "a type conversion needs exactly one argument", 
     errInvalidPragmaX: "invalid pragma: $1", 
     errXNotAllowedHere: "$1 not allowed here",
@@ -353,6 +353,7 @@ const
     warnAnalysisLoophole: "thread analysis incomplete due to unkown call '$1' [AnalysisLoophole]",
     warnDifferentHeaps: "possible inconsistency of thread local heaps [DifferentHeaps]",
     warnWriteToForeignHeap: "write to foreign heap [WriteToForeignHeap]",
+    warnImplicitNarrowing: "implicit narrowing conversion: '$1' [ImplicitNarrowing]",
     warnUser: "$1 [User]", 
     hintSuccess: "operation successful [Success]", 
     hintSuccessX: "operation successful ($# lines compiled; $# sec total; $#) [SuccessX]", 
@@ -370,13 +371,14 @@ const
     hintUser: "$1 [User]"]
 
 const
-  WarningsToStr*: array[0..16, string] = ["CannotOpenFile", "OctalEscape", 
+  WarningsToStr*: array[0..17, string] = ["CannotOpenFile", "OctalEscape", 
     "XIsNeverRead", "XmightNotBeenInit",
     "Deprecated", "ConfigDeprecated",
     "SmallLshouldNotBeUsed", "UnknownMagic", 
     "RedefinitionOfLabel", "UnknownSubstitutionX", "LanguageXNotSupported", 
     "CommentXIgnored", "XisPassedToProcVar",
-    "AnalysisLoophole", "DifferentHeaps", "WriteToForeignHeap", "User"]
+    "AnalysisLoophole", "DifferentHeaps", "WriteToForeignHeap",
+    "ImplicitNarrowing,", "User"]
 
   HintsToStr*: array[0..13, string] = ["Success", "SuccessX", "LineTooLong", 
     "XDeclaredButNotUsed", "ConvToBaseNotNeeded", "ConvFromXtoItselfNotNeeded", 

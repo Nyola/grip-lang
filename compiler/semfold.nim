@@ -13,7 +13,7 @@
 import 
   strutils, lists, options, ast, astalgo, trees, treetab, nimsets, times, 
   nversion, platform, math, msgs, os, condsyms, idents, renderer, types,
-  commands
+  commands, magicsys, saturate
 
 proc getConstExpr*(m: PSym, n: PNode): PNode
   # evaluates the constant expression or returns nil if it is no constant
@@ -26,12 +26,19 @@ proc newStrNodeT*(strVal: string, n: PNode): PNode
 
 # implementation
 
-proc newIntNodeT(intVal: BiggestInt, n: PNode): PNode = 
-  if skipTypes(n.typ, abstractVarRange).kind == tyChar: 
-    result = newIntNode(nkCharLit, intVal)
-  else: 
+proc newIntNodeT(intVal: BiggestInt, n: PNode): PNode =
+  case skipTypes(n.typ, abstractVarRange).kind
+  of tyInt:
     result = newIntNode(nkIntLit, intVal)
-  result.typ = n.typ
+    result.typ = getIntLitType(result)
+    # hrm, this is not correct: 1 + high(int) shouldn't produce tyInt64 ...
+    #setIntLitType(result)
+  of tyChar:
+    result = newIntNode(nkCharLit, intVal)
+    result.typ = n.typ
+  else:
+    result = newIntNode(nkIntLit, intVal)
+    result.typ = n.typ
   result.info = n.info
 
 proc newFloatNodeT(floatVal: BiggestFloat, n: PNode): PNode = 
@@ -66,6 +73,150 @@ proc ordinalValToString(a: PNode): string =
     InternalError(a.info, "no symbol for ordinal value: " & $x)
   else:
     result = $x
+
+proc isFloatRange(t: PType): bool {.inline.} =
+  result = t.kind == tyRange and t.sons[0].kind in {tyFloat..tyFloat128}
+
+proc isIntRange(t: PType): bool {.inline.} =
+  result = t.kind == tyRange and t.sons[0].kind in {
+      tyInt..tyInt64, tyUInt8..tyUInt32}
+
+proc pickIntRange(a, b: PType): PType =
+  if isIntRange(a): result = a
+  elif isIntRange(b): result = b
+  else: result = a
+
+proc isIntRangeOrLit(t: PType): bool =
+  result = isIntRange(t) or isIntLit(t)
+
+proc pickMinInt(n: PNode): biggestInt =
+  if n.kind in {nkIntLit..nkUInt64Lit}:
+    result = n.intVal
+  elif isIntLit(n.typ):
+    result = n.typ.n.intVal
+  elif isIntRange(n.typ):
+    result = firstOrd(n.typ)
+  else:
+    InternalError(n.info, "pickMinInt")
+
+proc pickMaxInt(n: PNode): biggestInt =
+  if n.kind in {nkIntLit..nkUInt64Lit}:
+    result = n.intVal
+  elif isIntLit(n.typ):
+    result = n.typ.n.intVal
+  elif isIntRange(n.typ):
+    result = lastOrd(n.typ)
+  else:
+    InternalError(n.info, "pickMaxInt")
+
+proc makeRange(typ: PType, first, last: biggestInt): PType = 
+  var n = newNode(nkRange)
+  addSon(n, newIntNode(nkIntLit, min(first, last)))
+  addSon(n, newIntNode(nkIntLit, max(first, last)))
+  result = newType(tyRange, typ.owner)
+  result.n = n
+  addSonSkipIntLit(result, skipTypes(typ, {tyRange}))
+
+proc makeRangeF(typ: PType, first, last: biggestFloat): PType =
+  var n = newNode(nkRange)
+  addSon(n, newFloatNode(nkFloatLit, min(first.float, last.float)))
+  addSon(n, newFloatNode(nkFloatLit, max(first.float, last.float)))
+  result = newType(tyRange, typ.owner)
+  result.n = n
+  addSonSkipIntLit(result, skipTypes(typ, {tyRange}))
+
+proc getIntervalType*(m: TMagic, n: PNode): PType =
+  # Nimrod requires interval arithmetic for ``range`` types. Lots of tedious
+  # work but the feature is very nice for reducing explicit conversions.
+  result = n.typ
+  
+  template commutativeOp(opr: expr) {.immediate.} =
+    let a = n.sons[1]
+    let b = n.sons[2]
+    if isIntRangeOrLit(a.typ) and isIntRangeOrLit(b.typ):
+      result = makeRange(pickIntRange(a.typ, b.typ),
+                         opr(pickMinInt(a), pickMinInt(b)),
+                         opr(pickMaxInt(a), pickMaxInt(b)))
+  
+  template binaryOp(opr: expr) {.immediate.} =
+    let a = n.sons[1]
+    let b = n.sons[2]
+    if isIntRange(a.typ) and b.kind in {nkIntLit..nkUInt64Lit}:
+      result = makeRange(a.typ,
+                         opr(pickMinInt(a), pickMinInt(b)),
+                         opr(pickMaxInt(a), pickMaxInt(b)))
+  
+  case m
+  of mUnaryMinusI, mUnaryMinusI64:
+    let a = n.sons[1].typ
+    if isIntRange(a):
+      # (1..3) * (-1) == (-3.. -1)
+      result = makeRange(a, 0|-|lastOrd(a), 0|-|firstOrd(a))
+  of mUnaryMinusF64:
+    let a = n.sons[1].typ
+    if isFloatRange(a):
+      result = makeRangeF(a, -getFloat(a.n.sons[1]),
+                             -getFloat(a.n.sons[0]))
+  of mAbsF64:
+    let a = n.sons[1].typ
+    if isFloatRange(a):
+      # abs(-5.. 1) == (1..5)
+      result = makeRangeF(a, abs(getFloat(a.n.sons[1])),
+                             abs(getFloat(a.n.sons[0])))
+  of mAbsI, mAbsI64:
+    let a = n.sons[1].typ
+    if isIntRange(a):
+      result = makeRange(a, `|abs|`(getInt(a.n.sons[1])),
+                            `|abs|`(getInt(a.n.sons[0])))
+  of mSucc:
+    let a = n.sons[1].typ
+    let b = n.sons[2].typ
+    if isIntRange(a) and isIntLit(b):
+      # (-5.. 1) + 6 == (-5 + 6)..(-1 + 6)
+      result = makeRange(a, pickMinInt(n.sons[1]) |+| pickMinInt(n.sons[2]),
+                            pickMaxInt(n.sons[1]) |+| pickMaxInt(n.sons[2]))
+  of mPred:
+    let a = n.sons[1].typ
+    let b = n.sons[2].typ
+    if isIntRange(a) and isIntLit(b):
+      result = makeRange(a, pickMinInt(n.sons[1]) |-| pickMinInt(n.sons[2]),
+                            pickMaxInt(n.sons[1]) |-| pickMaxInt(n.sons[2]))
+  of mAddI, mAddI64, mAddU, mAddU64:
+    commutativeOp(`|+|`)
+  of mMulI, mMulI64, mMulU, mMulU64:
+    commutativeOp(`|*|`)
+  of mSubI, mSubI64, mSubU, mSubU64:
+    binaryOp(`|-|`)
+  of mBitandI, mBitandI64:
+    var a = n.sons[1]
+    var b = n.sons[2]
+    # symmetrical:
+    if b.kind notin {nkIntLit..nkUInt64Lit}: swap(a, b)
+    if b.kind in {nkIntLit..nkUInt64Lit}:
+      let x = b.intVal|+|1
+      if (x and -x) == x and x >= 0:
+        result = makeRange(a.typ, 0, b.intVal)
+  of mModI, mModI64, mModU, mModU64:
+    # so ... if you ever wondered about modulo's signedness; this defines it:
+    let a = n.sons[1]
+    let b = n.sons[2]
+    if b.kind in {nkIntLit..nkUInt64Lit}:
+      if b.intVal >= 0:
+        result = makeRange(a.typ, 0, b.intVal-1)
+      else:
+        result = makeRange(a.typ, b.intVal+1, 0)
+  of mDivI, mDivI64, mDivU, mDivU64:
+    binaryOp(`|div|`)
+  of mMinI, mMinI64:
+    commutativeOp(min)
+  of mMaxI, mMaxI64:
+    commutativeOp(max)
+  else: nil
+  
+discard """
+  mShlI, mShlI64,
+  mShrI, mShrI64, mAddF64, mSubF64, mMulF64, mDivF64, mMaxF64, mMinF64
+"""
 
 proc evalOp(m: TMagic, n, a, b, c: PNode): PNode = 
   # b and c may be nil
@@ -112,15 +263,17 @@ proc evalOp(m: TMagic, n, a, b, c: PNode): PNode =
     of tyInt8: result = newIntNodeT(int8(getInt(a)) shl int8(getInt(b)), n)
     of tyInt16: result = newIntNodeT(int16(getInt(a)) shl int16(getInt(b)), n)
     of tyInt32: result = newIntNodeT(int32(getInt(a)) shl int32(getInt(b)), n)
-    of tyInt64, tyInt: result = newIntNodeT(`shl`(getInt(a), getInt(b)), n)
+    of tyInt64, tyInt, tyUInt..tyUInt64: 
+      result = newIntNodeT(`shl`(getInt(a), getInt(b)), n)
     else: InternalError(n.info, "constant folding for shl")
   of mShrI, mShrI64: 
     case skipTypes(n.typ, abstractRange).kind
     of tyInt8: result = newIntNodeT(int8(getInt(a)) shr int8(getInt(b)), n)
     of tyInt16: result = newIntNodeT(int16(getInt(a)) shr int16(getInt(b)), n)
     of tyInt32: result = newIntNodeT(int32(getInt(a)) shr int32(getInt(b)), n)
-    of tyInt64, tyInt: result = newIntNodeT(`shr`(getInt(a), getInt(b)), n)
-    else: InternalError(n.info, "constant folding for shl")
+    of tyInt64, tyInt, tyUInt..tyUInt64:
+      result = newIntNodeT(`shr`(getInt(a), getInt(b)), n)
+    else: InternalError(n.info, "constant folding for shr")
   of mDivI, mDivI64: result = newIntNodeT(getInt(a) div getInt(b), n)
   of mModI, mModI64: result = newIntNodeT(getInt(a) mod getInt(b), n)
   of mAddF64: result = newFloatNodeT(getFloat(a) + getFloat(b), n)
@@ -190,8 +343,8 @@ proc evalOp(m: TMagic, n, a, b, c: PNode): PNode =
   of mCopyStr: result = newStrNodeT(substr(getStr(a), int(getOrdValue(b))), n)
   of mCopyStrLast: 
     result = newStrNodeT(substr(getStr(a), int(getOrdValue(b)), 
-                                         int(getOrdValue(c))), n)
-  of mFloatToStr: result = newStrNodeT($(getFloat(a)), n)
+                                           int(getOrdValue(c))), n)
+  of mFloatToStr: result = newStrNodeT($getFloat(a), n)
   of mCStrToStr, mCharToStr: result = newStrNodeT(getStrOrChar(a), n)
   of mStrToStr: result = a
   of mEnumToStr: result = newStrNodeT(ordinalValToString(a), n)
@@ -298,6 +451,7 @@ proc getAppType(n: PNode): PNode =
     result = newStrNodeT("console", n)
 
 proc foldConv*(n, a: PNode): PNode = 
+  # XXX range checks?
   case skipTypes(n.typ, abstractRange).kind
   of tyInt..tyInt64: 
     case skipTypes(a.typ, abstractRange).kind
@@ -449,7 +603,10 @@ proc getConstExpr(m: PSym, n: PNode): PNode =
         else:
           result = magicCall(m, n)
       of mIs:
-        result = newIntNodeT(ord(sameType(n[1].typ, n[2].typ)), n)
+        # BUGFIX: don't evaluate this too early: ``T is void``
+        if not containsGenericType(n[1].typ) and 
+           not containsGenericType(n[2].typ):
+          result = newIntNodeT(ord(sameType(n[1].typ, n[2].typ)), n)
       of mAstToStr:
         result = newStrNodeT(renderTree(n[1], {renderNoComments}), n)
       of mConStrStr:

@@ -592,7 +592,7 @@ proc evalAddr(c: PEvalContext, n: PNode, flags: TEvalFlags): PNode =
   if isSpecial(result): return 
   var a = result
   var t = newType(tyPtr, c.module)
-  addSon(t, a.typ)
+  addSonSkipIntLit(t, a.typ)
   result = newNodeIT(nkRefTy, n.info, t)
   addSon(result, a)
 
@@ -829,7 +829,7 @@ proc isEmpty(n: PNode): bool =
 # Maybe the lexer should mark both the beginning and the end of expressions,
 # then this function could be removed.
 proc stringStartingLine(s: PNode): int =
-  result = s.info.line - countLines(s.strVal)
+  result = s.info.line.int - countLines(s.strVal)
 
 proc evalParseExpr(c: PEvalContext, n: PNode): PNode =
   var code = evalAux(c, n.sons[1], {})
@@ -898,7 +898,7 @@ proc evalTemplate*(n: PNode, sym: PSym): PNode =
  
 proc evalTypeTrait*(n: PNode, context: PSym): PNode =
   ## XXX: This should be pretty much guaranteed to be true
-  # by the type traits procs' signitures, but until the
+  # by the type traits procs' signatures, but until the
   # code is more mature it doesn't hurt to be extra safe
   internalAssert n.sons.len >= 2 and
                  n.sons[1].sym.typ.kind == tyTypeDesc
@@ -906,7 +906,7 @@ proc evalTypeTrait*(n: PNode, context: PSym): PNode =
   let typ = n.sons[1].sym.typ.skipTypes({tyTypeDesc})
   case n.sons[0].sym.name.s
   of "name":
-    result = newStrNode(nkStrLit, typ.typeToString)
+    result = newStrNode(nkStrLit, typ.typeToString(preferExported))
     result.typ = newType(tyString, context)
     result.info = n.info
 

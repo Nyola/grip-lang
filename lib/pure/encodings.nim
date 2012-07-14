@@ -298,7 +298,7 @@ proc open*(destEncoding = "UTF-8", srcEncoding = "CP1252"): PConverter =
   ## opens a converter that can convert from `srcEncoding` to `destEncoding`.
   ## Raises `EIO` if it cannot fullfill the request.
   when not defined(windows):
-    result = iconvOpen(srcEncoding, destEncoding)
+    result = iconvOpen(destEncoding, srcEncoding)
     if result == nil:
       raise newException(EInvalidEncoding, 
         "cannot create encoding converter from " & 
@@ -368,7 +368,7 @@ when defined(windows):
       lpWideCharStr = cstring(result),
       cchWideChar = cint(result.len div 2),
       lpMultiByteStr = cstring(res),
-      cbMultiByte = cap)
+      cbMultiByte = cap.cint)
     if m == 0:
       # try again; ask for capacity:
       cap = WideCharToMultiByte(
@@ -386,7 +386,7 @@ when defined(windows):
         lpWideCharStr = cstring(result),
         cchWideChar = cint(result.len div 2),
         lpMultiByteStr = cstring(res),
-        cbMultiByte = cap)
+        cbMultiByte = cap.cint)
       if m == 0: OSError()
       setLen(res, m)
       result = res

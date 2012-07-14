@@ -629,7 +629,7 @@ proc parseTuple(p: var TParser): PNode =
     while (p.tok.tokType == tkSymbol) or (p.tok.tokType == tkAccent): 
       var a = parseIdentColonEquals(p, {})
       addSon(result, a)
-      if p.tok.tokType != tkComma: break 
+      if p.tok.tokType notin {tkComma, tkSemicolon}: break 
       getTok(p)
       optInd(p, a)
     optPar(p)
@@ -652,7 +652,7 @@ proc parseParamList(p: var TParser, retColon = true): PNode =
         parMessage(p, errTokenExpected, ")")
         break 
       addSon(result, a)
-      if p.tok.tokType != tkComma: break 
+      if p.tok.tokType notin {tkComma, tkSemicolon}: break 
       getTok(p)
       optInd(p, a)
     optPar(p)
@@ -1135,7 +1135,7 @@ proc parseGenericParamList(p: var TParser): PNode =
   while (p.tok.tokType == tkSymbol) or (p.tok.tokType == tkAccent): 
     var a = parseGenericParam(p)
     addSon(result, a)
-    if p.tok.tokType != tkComma: break 
+    if p.tok.tokType notin {tkComma, tkSemicolon}: break 
     getTok(p)
     optInd(p, a)
   optPar(p)
@@ -1247,6 +1247,8 @@ proc parseEnum(p: var TParser): PNode =
       getTok(p)
       optInd(p, a)
     addSon(result, a)
+  if result.len <= 1:
+    lexMessage(p.lex, errIdentifierExpected, prettyTok(p.tok))
 
 proc parseObjectPart(p: var TParser): PNode
 proc parseObjectWhen(p: var TParser): PNode = 
@@ -1479,7 +1481,7 @@ proc parseStmt(p: var TParser): PNode =
     getTok(p)
     while true: 
       case p.tok.tokType
-      of tkSad: getTok(p)
+      of tkSad, tkSemicolon: getTok(p)
       of tkEof: break 
       of tkDed: 
         getTok(p)
@@ -1492,16 +1494,17 @@ proc parseStmt(p: var TParser): PNode =
           break 
         addSon(result, a)
     popInd(p.lex)
-  else: 
+  else:
     # the case statement is only needed for better error messages:
     case p.tok.tokType
-    of tkIf, tkWhile, tkCase, tkTry, tkFor, tkBlock, tkAsm, tkProc, tkIterator, 
-       tkMacro, tkType, tkConst, tkWhen, tkVar: 
+    of tkIf, tkWhile, tkCase, tkTry, tkFor, tkBlock, tkAsm, tkProc, tkIterator,
+       tkMacro, tkType, tkConst, tkWhen, tkVar:
       parMessage(p, errComplexStmtRequiresInd)
       result = ast.emptyNode
-    else: 
+    else:
       result = simpleStmt(p)
       if result.kind == nkEmpty: parMessage(p, errExprExpected, p.tok)
+      if p.tok.tokType == tkSemicolon: getTok(p)
       if p.tok.tokType == tkSad: getTok(p)
   
 proc parseAll(p: var TParser): PNode = 
@@ -1520,7 +1523,7 @@ proc parseTopLevelStmt(p: var TParser): PNode =
   result = ast.emptyNode
   while true: 
     case p.tok.tokType
-    of tkSad: getTok(p)
+    of tkSad, tkSemicolon: getTok(p)
     of tkDed, tkInd: 
       parMessage(p, errInvalidIndentation)
       getTok(p)
