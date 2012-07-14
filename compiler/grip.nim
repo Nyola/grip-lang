@@ -229,7 +229,7 @@ proc lineinfo(g: PGripFile, line, col: int): TLineInfo =
   return newLineInfo(g.fileIdx, line, col)
 
 template scanLine(g, p, charClass: expr, body: stmt): stmt =
-  let
+  var
     scanStart = p
     line = lineAt(g, p)
     e = line.len
