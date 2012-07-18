@@ -111,7 +111,7 @@ proc new*[T](a: var ref T) {.magic: "New", noSideEffect.}
 proc internalNew*[T](a: var ref T) {.magic: "New", noSideEffect.}
   ## leaked implementation detail. Do not use.
 
-proc new*[T](a: var ref T, finalizer: proc (x: ref T)) {.
+proc new*[T](a: var ref T, finalizer: proc (x: ref T) {.nimcall.}) {.
   magic: "NewFinalize", noSideEffect.}
   ## creates a new object of type ``T`` and returns a safe (traced)
   ## reference to it in ``a``. When the garbage collector frees the object,
@@ -614,6 +614,7 @@ proc `==` *(x, y: bool): bool {.magic: "EqB", noSideEffect.}
 proc `==` *[T](x, y: set[T]): bool {.magic: "EqSet", noSideEffect.}
 proc `==` *[T](x, y: ref T): bool {.magic: "EqRef", noSideEffect.}
 proc `==` *[T](x, y: ptr T): bool {.magic: "EqRef", noSideEffect.}
+proc `==` *[T: proc](x, y: T): bool {.magic: "EqProc", noSideEffect.}
 
 proc `<=` *[TEnum: enum](x, y: TEnum): bool {.magic: "LeEnum", noSideEffect.}
 proc `<=` *(x, y: string): bool {.magic: "LeStr", noSideEffect.}
@@ -945,6 +946,17 @@ type # these work for most platforms:
   clongdouble* {.importc: "long double", nodecl.} = BiggestFloat
     ## This is the same as the type ``long double`` in *C*.
     ## This C type is not supported by Nimrod's code generator
+
+  cuchar* {.importc: "unsigned char", nodecl.} = char
+    ## This is the same as the type ``unsigned char`` in *C*.
+  cushort* {.importc: "unsigned short", nodecl.} = uint16
+    ## This is the same as the type ``unsigned short`` in *C*.
+  cuint* {.importc: "int", nodecl.} = uint32
+    ## This is the same as the type ``unsigned int`` in *C*.
+  culong* {.importc: "unsigned long", nodecl.} = uint
+    ## This is the same as the type ``unsigned long`` in *C*.
+  culonglong* {.importc: "unsigned long long", nodecl.} = uint64
+    ## This is the same as the type ``unsigned long long`` in *C*.
 
   cstringArray* {.importc: "char**", nodecl.} = ptr array [0..50_000, cstring]
     ## This is binary compatible to the type ``char**`` in *C*. The array's
@@ -1336,6 +1348,7 @@ proc isNil*(x: string): bool {.noSideEffect, magic: "IsNil".}
 proc isNil*[T](x: ptr T): bool {.noSideEffect, magic: "IsNil".}
 proc isNil*(x: pointer): bool {.noSideEffect, magic: "IsNil".}
 proc isNil*(x: cstring): bool {.noSideEffect, magic: "IsNil".}
+proc isNil*[T: proc](x: T): bool {.noSideEffect, magic: "IsNil".}
   ## Fast check whether `x` is nil. This is sometimes more efficient than
   ## ``== nil``.
 
@@ -1405,13 +1418,13 @@ proc pop*[T](s: var seq[T]): T {.inline, noSideEffect.} =
   result = s[L]
   setLen(s, L)
 
-proc each*[T, S](data: openArray[T], op: proc (x: T): S): seq[S] = 
+proc each*[T, S](data: openArray[T], op: proc (x: T): S {.closure.}): seq[S] = 
   ## The well-known ``map`` operation from functional programming. Applies
   ## `op` to every item in `data` and returns the result as a sequence.
   newSeq(result, data.len)
   for i in 0..data.len-1: result[i] = op(data[i])
 
-proc each*[T](data: var openArray[T], op: proc (x: var T)) =
+proc each*[T](data: var openArray[T], op: proc (x: var T) {.closure.}) =
   ## The well-known ``map`` operation from functional programming. Applies
   ## `op` to every item in `data`.
   for i in 0..data.len-1: op(data[i])
@@ -1556,11 +1569,11 @@ const nimrodStackTrace = compileOption("stacktrace")
 # of the code
 
 var
-  dbgLineHook*: proc ()
+  dbgLineHook*: proc () {.nimcall.}
     ## set this variable to provide a procedure that should be called before
     ## each executed instruction. This should only be used by debuggers!
     ## Only code compiled with the ``debugger:on`` switch calls this hook.
-  globalRaiseHook*: proc (e: ref E_Base): bool
+  globalRaiseHook*: proc (e: ref E_Base): bool {.nimcall.}
     ## with this hook you can influence exception handling on a global level.
     ## If not nil, every 'raise' statement ends up calling this hook. Ordinary
     ## application code should never set this hook! You better know what you
@@ -1568,7 +1581,7 @@ var
     ## exception is caught and does not propagate further through the call
     ## stack.
 
-  localRaiseHook* {.threadvar.}: proc (e: ref E_Base): bool
+  localRaiseHook* {.threadvar.}: proc (e: ref E_Base): bool {.nimcall.}
     ## with this hook you can influence exception handling on a
     ## thread local level.
     ## If not nil, every 'raise' statement ends up calling this hook. Ordinary
@@ -1576,7 +1589,7 @@ var
     ## do when setting this. If ``localRaiseHook`` returns false, the exception
     ## is caught and does not propagate further through the call stack.
     
-  outOfMemHook*: proc ()
+  outOfMemHook*: proc () {.nimcall.}
     ## set this variable to provide a procedure that should be called 
     ## in case of an `out of memory`:idx: event. The standard handler
     ## writes an error message and terminates the program. `outOfMemHook` can

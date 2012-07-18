@@ -1,13 +1,13 @@
 version 0.9.0
 =============
 
+- fix DLLs
+- fix 'bind' for templates
 - implicit deref for parameter matching
 - deprecate ``var x, y = 0`` as it's confusing for tuple consistency
-- test sequence of closures; especially that the GC does not leak for those!
 
 New pragmas:
 - ``hoist`` pragma for loop hoisting
-- fix & document ``byCopy`` pragma
 - document destructors
 
 - ``borrow`` needs to take type classes into account
@@ -17,8 +17,8 @@ New pragmas:
 - fix remaining closure bugs:
   - make toplevel but in a scope vars local; make procs there inner procs
   - fix evals.nim with closures
-  - proc types shall have closure calling convention per default
   - implement "closure tuple consists of a single 'ref'" optimization
+  - make closure default calling convention for proc types
 
 - document 'do' notation
 - rethink the syntax: distinction between expr and stmt is unfortunate; 
@@ -46,6 +46,9 @@ version 0.9.XX
 
 - make templates hygienic by default: try to gensym() everything in the 'block'
   of a template; find a better solution for gensym instead of `*ident`
+- introduce 'callsite' magic and make macros and templates the same
+- better support for macros that rewrite procs
+- macros need access to types and symbols
 - document nimdoc properly finally
 - make 'clamp' a magic for the range stuff
 - implement a warning message for shadowed 'result' variable
@@ -88,13 +91,12 @@ Library
 - locale support; i18n module
 - bignums
 
-- pdcurses bindings
-
 
 Low priority
 ------------
 
 - change how comments are part of the AST
+- fix & document ``byCopy`` pragma
 - ``with proc `+`(x, y: T): T`` for generic code
 - new feature: ``distinct T with operations``
 - implement the "easy" constructors idea

@@ -458,7 +458,6 @@ proc binaryArith(p: BProc, e: PNode, d: var TLoc, op: TMagic) =
       "($1 <= $2)",           # LeB
       "($1 < $2)",            # LtB
       "($1 == $2)",           # EqRef
-      "($1 == $2)",           # EqProc
       "($1 == $2)",           # EqPtr
       "($1 <= $2)",           # LePtr
       "($1 < $2)",            # LtPtr
@@ -476,6 +475,26 @@ proc binaryArith(p: BProc, e: PNode, d: var TLoc, op: TMagic) =
   putIntoDest(p, d, e.typ,
               ropef(binArithTab[op], [rdLoc(a), rdLoc(b), toRope(s),
                                       getSimpleTypeDesc(p.module, e.typ)]))
+
+proc genEqProc(p: BProc, e: PNode, d: var TLoc) =
+  var a, b: TLoc
+  assert(e.sons[1].typ != nil)
+  assert(e.sons[2].typ != nil)
+  InitLocExpr(p, e.sons[1], a)
+  InitLocExpr(p, e.sons[2], b)
+  if a.t.callConv == ccClosure:
+    putIntoDest(p, d, e.typ, 
+      ropef("($1.ClPrc == $2.ClPrc && $1.ClEnv == $2.ClEnv)", [
+      rdLoc(a), rdLoc(b)]))
+  else:
+    putIntoDest(p, d, e.typ, ropef("($1 == $2)", [rdLoc(a), rdLoc(b)]))
+
+proc genIsNil(p: BProc, e: PNode, d: var TLoc) =
+  let t = skipTypes(e.sons[1].typ, abstractRange)
+  if t.kind == tyProc and t.callConv == ccClosure:
+    unaryExpr(p, e, d, "$1.ClPrc == 0")
+  else:
+    unaryExpr(p, e, d, "$1 == 0")
 
 proc unaryArith(p: BProc, e: PNode, d: var TLoc, op: TMagic) =
   const
@@ -1367,6 +1386,7 @@ proc genMagicExpr(p: BProc, e: PNode, d: var TLoc, op: TMagic) =
   of mUnaryMinusI..mAbsI64: unaryArithOverflow(p, e, d, op)
   of mAddF64..mDivF64: binaryFloatArith(p, e, d, op)
   of mShrI..mXor: binaryArith(p, e, d, op)
+  of mEqProc: genEqProc(p, e, d)
   of mAddi..mModi64: binaryArithOverflow(p, e, d, op)
   of mRepr: genRepr(p, e, d)
   of mGetTypeInfo: genGetTypeInfo(p, e, d)
@@ -1406,7 +1426,7 @@ proc genMagicExpr(p: BProc, e: PNode, d: var TLoc, op: TMagic) =
   of mEqStr: genStrEquals(p, e, d)
   of mLeStr: binaryExpr(p, e, d, "(#cmpStrings($1, $2) <= 0)")
   of mLtStr: binaryExpr(p, e, d, "(#cmpStrings($1, $2) < 0)")
-  of mIsNil: unaryExpr(p, e, d, "$1 == 0")
+  of mIsNil: genIsNil(p, e, d)
   of mIntToStr: genDollar(p, e, d, "#nimIntToStr($1)")
   of mInt64ToStr: genDollar(p, e, d, "#nimInt64ToStr($1)")
   of mBoolToStr: genDollar(p, e, d, "#nimBoolToStr($1)")
