@@ -11,7 +11,7 @@
 
 # ------------------------- Name Mangling --------------------------------
 
-proc mangle(name: string): string = 
+proc mangleField(name: string): string = 
   case name[0]
   of 'a'..'z': 
     result = ""
@@ -20,7 +20,30 @@ proc mangle(name: string): string =
     result = ""
     add(result, name[0])
   else: result = "HEX" & toHex(ord(name[0]), 2)
-  for i in countup(0 + 1, len(name) + 0 - 1): 
+  for i in countup(1, len(name) - 1): 
+    case name[i]
+    of 'A'..'Z': 
+      add(result, chr(ord(name[i]) - ord('A') + ord('a')))
+    of '_': 
+      nil
+    of 'a'..'z', '0'..'9': 
+      add(result, name[i])
+    else: 
+      add(result, "HEX")
+      add(result, toHex(ord(name[i]), 2))
+
+proc mangle(name: string): string = 
+  when false:
+    case name[0]
+    of 'a'..'z': 
+      result = ""
+      add(result, chr(ord(name[0]) - ord('a') + ord('A')))
+    of '0'..'9', 'A'..'Z': 
+      result = ""
+      add(result, name[0])
+    else: result = "HEX" & toHex(ord(name[0]), 2)
+  result = ""
+  for i in countup(0, len(name) - 1): 
     case name[i]
     of 'A'..'Z': 
       add(result, chr(ord(name[i]) - ord('A') + ord('a')))
@@ -103,7 +126,7 @@ proc mangleName(s: PSym): PRope =
       # These are not properly scoped now - we need to add blocks
       # around for loops in transf
       if keepOrigName:
-        result = s.name.s.toRope
+        result = s.name.s.mangle.toRope
       else:
         app(result, toRope(mangle(s.name.s)))
         app(result, "_")
@@ -120,7 +143,7 @@ proc isCompileTimeOnly(t: PType): bool =
 var anonTypeName = toRope"TY"
 
 proc typeName(typ: PType): PRope =
-  result = if typ.sym != nil: typ.sym.name.s.toRope
+  result = if typ.sym != nil: typ.sym.name.s.mangle.toRope
            else: anonTypeName
 
 proc getTypeName(typ: PType): PRope = 
@@ -371,8 +394,8 @@ proc mangleRecFieldName(field: PSym, rectype: PType): PRope =
   if (rectype.sym != nil) and
       ({sfImportc, sfExportc} * rectype.sym.flags != {}): 
     result = field.loc.r
-  else: 
-    result = toRope(mangle(field.name.s))
+  else:
+    result = toRope(mangleField(field.name.s))
   if result == nil: InternalError(field.info, "mangleRecFieldName")
   
 proc genRecordFieldsAux(m: BModule, n: PNode, 
@@ -863,41 +886,43 @@ include ccgtrav
 
 proc genTypeInfo(m: BModule, typ: PType): PRope = 
   var t = getUniqueType(typ)
-  # gNimDat contains all the type information nowadays:
-  var dataGenerated = ContainsOrIncl(gNimDat.typeInfoMarker, t.id)
   result = ropef("NTI$1", [toRope(t.id)])
-  if not ContainsOrIncl(m.typeInfoMarker, t.id): 
-    # declare type information structures:
+  let owner = typ.skipTypes(abstractPtrs).owner.getModule
+  if owner != m.module:
+    # make sure the type info is created in the owner module
+    discard genTypeInfo(owner.bmod, typ)
+    # refenrece the type info as extern here
     discard cgsym(m, "TNimType")
     discard cgsym(m, "TNimNode")
     appf(m.s[cfsVars], "extern TNimType* $1; /* $2 */$n", 
          [result, toRope(typeToString(t))])
-  if dataGenerated: return 
+    return
+  if ContainsOrIncl(m.typeInfoMarker, t.id): return
   case t.kind
   of tyEmpty: result = toRope"0"
   of tyPointer, tyBool, tyChar, tyCString, tyString, tyInt..tyUInt64, tyVar:
-    genTypeInfoAuxBase(gNimDat, t, result, toRope"0")
+    genTypeInfoAuxBase(m, t, result, toRope"0")
   of tyProc:
     if t.callConv != ccClosure:
-      genTypeInfoAuxBase(gNimDat, t, result, toRope"0")
+      genTypeInfoAuxBase(m, t, result, toRope"0")
     else:
-      genTupleInfo(gNimDat, fakeClosureType(t.owner), result)
+      genTupleInfo(m, fakeClosureType(t.owner), result)
   of tySequence, tyRef:
-    genTypeInfoAux(gNimDat, t, result)
+    genTypeInfoAux(m, t, result)
     if optRefcGC in gGlobalOptions:
-      let markerProc = genTraverseProc(gNimDat, t, tiNew)
-      appf(gNimDat.s[cfsTypeInit3], "$1->marker = $2;$n", [result, markerProc])
-  of tyPtr, tyRange: genTypeInfoAux(gNimDat, t, result)
-  of tyArrayConstr, tyArray: genArrayInfo(gNimDat, t, result)
-  of tySet: genSetInfo(gNimDat, t, result)
-  of tyEnum: genEnumInfo(gNimDat, t, result)
-  of tyObject: genObjectInfo(gNimDat, t, result)
+      let markerProc = genTraverseProc(m, t, tiNew)
+      appf(m.s[cfsTypeInit3], "$1->marker = $2;$n", [result, markerProc])
+  of tyPtr, tyRange: genTypeInfoAux(m, t, result)
+  of tyArrayConstr, tyArray: genArrayInfo(m, t, result)
+  of tySet: genSetInfo(m, t, result)
+  of tyEnum: genEnumInfo(m, t, result)
+  of tyObject: genObjectInfo(m, t, result)
   of tyTuple: 
-    # if t.n != nil: genObjectInfo(gNimDat, t, result)
+    # if t.n != nil: genObjectInfo(m, t, result)
     # else:
     # BUGFIX: use consistently RTTI without proper field names; otherwise
     # results are not deterministic!
-    genTupleInfo(gNimDat, t, result)
+    genTupleInfo(m, t, result)
   else: InternalError("genTypeInfo(" & $t.kind & ')')
 
 proc genTypeSection(m: BModule, n: PNode) = 

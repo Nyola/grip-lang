@@ -620,7 +620,7 @@ proc parseIdentColonEquals(p: var TParser, flags: TDeclaredIdentFlags): PNode =
   else: 
     addSon(result, ast.emptyNode)
   
-proc parseTuple(p: var TParser): PNode = 
+proc parseTuple(p: var TParser, indentAllowed = false): PNode = 
   result = newNodeP(nkTupleTy, p)
   getTok(p)
   if p.tok.tokType == tkBracketLe:
@@ -634,6 +634,29 @@ proc parseTuple(p: var TParser): PNode =
       optInd(p, a)
     optPar(p)
     eat(p, tkBracketRi)
+  elif indentAllowed:
+    skipComment(p, result)
+    if p.tok.tokType == tkInd:
+      pushInd(p.lex, p.tok.indent)
+      getTok(p)
+      skipComment(p, result)
+      while true:
+        case p.tok.tokType
+        of tkSad:
+          getTok(p)
+        of tkSymbol, tkAccent:
+          var a = parseIdentColonEquals(p, {})
+          skipComment(p, a)
+          addSon(result, a)
+        of tkDed:
+          getTok(p)
+          break
+        of tkEof:
+          break
+        else:
+          parMessage(p, errIdentifierExpected, p.tok)
+          break
+      popInd(p.lex)
 
 proc parseParamList(p: var TParser, retColon = true): PNode = 
   var a: PNode
@@ -1367,6 +1390,18 @@ proc parseDistinct(p: var TParser): PNode =
   optInd(p, result)
   addSon(result, parseTypeDesc(p))
 
+proc parsePointerInTypeSection(p: var TParser, kind: TNodeKind): PNode =
+  result = newNodeP(kind, p)
+  getTok(p)
+  optInd(p, result)
+  if not isOperator(p.tok):
+    case p.tok.tokType
+    of tkObject: addSon(result, parseObject(p))
+    of tkTuple: addSon(result, parseTuple(p, true))
+    else:
+      if isExprStart(p):
+        addSon(result, parseTypeDesc(p))
+
 proc parseTypeDef(p: var TParser): PNode = 
   result = newNodeP(nkTypeDef, p)
   addSon(result, identWithPragma(p))
@@ -1380,9 +1415,12 @@ proc parseTypeDef(p: var TParser): PNode =
     of tkObject: a = parseObject(p)
     of tkEnum: a = parseEnum(p)
     of tkDistinct: a = parseDistinct(p)
+    of tkTuple: a = parseTuple(p, true)
+    of tkRef: a = parsePointerInTypeSection(p, nkRefTy)
+    of tkPtr: a = parsePointerInTypeSection(p, nkPtrTy)
     else: a = parseTypeDesc(p)
     addSon(result, a)
-  else: 
+  else:
     addSon(result, ast.emptyNode)
   indAndComment(p, result)    # special extension!
   
@@ -1412,13 +1450,12 @@ proc parseBind(p: var TParser): PNode =
   result = newNodeP(nkBindStmt, p)
   getTok(p)
   optInd(p, result)
-  while p.tok.tokType == tkSymbol: 
-    var a = newIdentNodeP(p.tok.ident, p)
-    getTok(p)
+  while true:
+    var a = qualifiedIdent(p)
     addSon(result, a)
-    if p.tok.tokType != tkComma: break 
+    if p.tok.tokType != tkComma: break
     getTok(p)
-    optInd(p, a)
+    optInd(p, a)  
   expectNl(p)
   
 proc parseStmtPragma(p: var TParser): PNode =
