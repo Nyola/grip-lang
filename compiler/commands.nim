@@ -365,7 +365,10 @@ proc processSwitch(switch, arg: string, pass: TCmdlinePass, info: TLineInfo) =
   of "clib":
     expectArg(switch, arg, pass, info)
     if pass in {passCmd2, passPP}: cLinkedLibs.add arg
-  of "index": 
+  of "header":
+    headerFile = arg
+    incl(gGlobalOptions, optGenIndex)
+  of "index":
     ProcessOnOffSwitchG({optGenIndex}, arg, pass, info)
   of "import":
     expectArg(switch, arg, pass, info)
@@ -452,7 +455,10 @@ proc processSwitch(switch, arg: string, pass: TCmdlinePass, info: TLineInfo) =
   of "context":
     expectNoArg(switch, arg, pass, info)
     incl(gGlobalOptions, optContext)
-  of "stdout": 
+  of "usages":
+    expectNoArg(switch, arg, pass, info)
+    incl(gGlobalOptions, optUsages)
+  of "stdout":
     expectNoArg(switch, arg, pass, info)
     incl(gGlobalOptions, optStdout)
   else:

@@ -118,6 +118,7 @@ proc getNotFoundError*(c: PContext, n: PNode): string =
   # Gives a detailed error message; this is separated from semOverloadedCall,
   # as semOverlodedCall is already pretty slow (and we need this information
   # only in case of an error).
+  if c.InCompilesContext > 0: return ""
   result = msgKindToString(errTypeMismatch)
   for i in countup(1, sonsLen(n) - 1): 
     #debug(n.sons[i].typ)
@@ -227,24 +228,25 @@ proc minRel(a, b: TTypeRelation): TTypeRelation =
   if a <= b: result = a
   else: result = b
   
-proc tupleRel(c: var TCandidate, f, a: PType): TTypeRelation = 
+proc tupleRel(c: var TCandidate, f, a: PType): TTypeRelation =
   result = isNone
   if sameType(f, a):
     result = isEqual
-  elif sonsLen(a) == sonsLen(f): 
+  elif sonsLen(a) == sonsLen(f):
     result = isEqual
-    for i in countup(0, sonsLen(f) - 1): 
+    for i in countup(0, sonsLen(f) - 1):
       var m = typeRel(c, f.sons[i], a.sons[i])
       if m < isSubtype: return isNone
       result = minRel(result, m)
-    if f.n != nil and a.n != nil: 
-      for i in countup(0, sonsLen(f.n) - 1): 
+    if f.n != nil and a.n != nil:
+      for i in countup(0, sonsLen(f.n) - 1):
         # check field names:
         if f.n.sons[i].kind != nkSym: InternalError(f.n.info, "tupleRel")
-        if a.n.sons[i].kind != nkSym: InternalError(a.n.info, "tupleRel")
-        var x = f.n.sons[i].sym
-        var y = a.n.sons[i].sym
-        if x.name.id != y.name.id: return isNone
+        elif a.n.sons[i].kind != nkSym: InternalError(a.n.info, "tupleRel")
+        else:
+          var x = f.n.sons[i].sym
+          var y = a.n.sons[i].sym
+          if x.name.id != y.name.id: return isNone
 
 proc matchTypeClass(c: var TCandidate, f, a: PType): TTypeRelation =
   for i in countup(0, f.sonsLen - 1):
@@ -500,7 +502,7 @@ proc typeRel(c: var TCandidate, f, a: PType): TTypeRelation =
       for i in countup(1, sonsLen(f) - 1): 
         if a.sons[i].kind == tyGenericParam: 
           InternalError("wrong instantiated type!")
-        if typeRel(c, f.sons[i], a.sons[i]) <= isSubtype: return 
+        elif typeRel(c, f.sons[i], a.sons[i]) <= isSubtype: return 
       result = isGeneric
     else:
       result = typeRel(c, f.sons[0], a)
@@ -538,7 +540,7 @@ proc typeRel(c: var TCandidate, f, a: PType): TTypeRelation =
       result = isNone
   of tyExpr, tyStmt:
     result = isGeneric
-  else: internalError("typeRel(" & $f.kind & ')')
+  else: internalError("typeRel: " & $f.kind)
   
 proc cmpTypes*(f, a: PType): TTypeRelation = 
   var c: TCandidate
@@ -550,7 +552,9 @@ proc getInstantiatedType(c: PContext, arg: PNode, m: TCandidate,
   result = PType(idTableGet(m.bindings, f))
   if result == nil: 
     result = generateTypeInstance(c, m.bindings, arg, f)
-  if result == nil: InternalError(arg.info, "getInstantiatedType")
+  if result == nil:
+    InternalError(arg.info, "getInstantiatedType")
+    result = errorType(c)
   
 proc implicitConv(kind: TNodeKind, f: PType, arg: PNode, m: TCandidate, 
                   c: PContext): PNode = 
@@ -793,6 +797,7 @@ proc matchesAux*(c: PContext, n, nOrig: PNode,
       else: 
         if m.callee.n.sons[f].kind != nkSym: 
           InternalError(n.sons[a].info, "matches")
+          return
         formal = m.callee.n.sons[f].sym
         if ContainsOrIncl(marker, formal.position): 
           # already in namedParams:

@@ -37,7 +37,7 @@ proc addResultNode(c: PContext, n: PNode)
 proc instGenericContainer(c: PContext, n: PNode, header: PType): PType
 
 proc typeMismatch(n: PNode, formal, actual: PType) = 
-  GlobalError(n.Info, errGenerated, msgKindToString(errTypeMismatch) &
+  LocalError(n.Info, errGenerated, msgKindToString(errTypeMismatch) &
       typeToString(actual) & ") " &
       `%`(msgKindToString(errButExpectedX), [typeToString(formal)]))
 
@@ -45,6 +45,9 @@ proc fitNode(c: PContext, formal: PType, arg: PNode): PNode =
   result = IndexTypesMatch(c, formal, arg.typ, arg)
   if result == nil:
     typeMismatch(arg, formal, arg.typ)
+    # error correction:
+    result = copyNode(arg)
+    result.typ = formal
 
 proc isTopLevel(c: PContext): bool {.inline.} = 
   result = c.tab.tos <= 2
@@ -62,7 +65,7 @@ proc semStmtScope(c: PContext, n: PNode): PNode
 
 proc ParamsTypeCheck(c: PContext, typ: PType) {.inline.} =
   if not typeAllowed(typ, skConst):
-    GlobalError(typ.n.info, errXisNoType, typeToString(typ))
+    LocalError(typ.n.info, errXisNoType, typeToString(typ))
 
 proc expectMacroOrTemplateCall(c: PContext, n: PNode): PSym
 
@@ -80,13 +83,15 @@ proc evalTypedExpr(c: PContext, e: PNode): PNode =
   if result == nil:
     result = evalConstExpr(c.module, e)
     if result == nil or result.kind == nkEmpty:
-      GlobalError(e.info, errConstExprExpected)
+      LocalError(e.info, errConstExprExpected)
+      # error correction:
+      result = e
 
 proc semConstExpr(c: PContext, n: PNode): PNode =
   var e = semExprWithType(c, n)
   if e == nil:
-    GlobalError(n.info, errConstExprExpected)
-    return nil
+    LocalError(n.info, errConstExprExpected)
+    return n
   result = evalTypedExpr(c, e)
 
 include seminst, semcall
@@ -129,12 +134,15 @@ proc forceBool(c: PContext, n: PNode): PNode =
   if result == nil: result = n
 
 proc semConstBoolExpr(c: PContext, n: PNode): PNode = 
-  result = fitNode(c, getSysType(tyBool), semExprWithType(c, n))
-  if result == nil: 
-    GlobalError(n.info, errConstExprExpected)
-    return 
+  let nn = semExprWithType(c, n)
+  result = fitNode(c, getSysType(tyBool), nn)
+  if result == nil:
+    LocalError(n.info, errConstExprExpected)
+    return nn
   result = getConstExpr(c.module, result)
-  if result == nil: GlobalError(n.info, errConstExprExpected)
+  if result == nil: 
+    LocalError(n.info, errConstExprExpected)
+    result = nn
 
 include semtypes, semexprs, semgnrc, semstmts
 
@@ -144,7 +152,8 @@ proc addCodeForGenerics(c: PContext, n: PNode) =
     if prc.kind in {skProc, skMethod, skConverter} and prc.magic == mNone: 
       if prc.ast == nil or prc.ast.sons[bodyPos] == nil: 
         InternalError(prc.info, "no code for " & prc.name.s)
-      addSon(n, prc.ast)
+      else:
+        addSon(n, prc.ast)
   c.generics.lastGenericIdx = Len(c.generics.generics)
 
 proc semExprNoFlags(c: PContext, n: PNode): PNode {.procvar.} = 
@@ -152,7 +161,7 @@ proc semExprNoFlags(c: PContext, n: PNode): PNode {.procvar.} =
 
 proc myOpen(module: PSym, filename: string): PPassContext = 
   var c = newContext(module, filename)
-  if (c.p != nil): InternalError(module.info, "sem.myOpen")
+  if c.p != nil: InternalError(module.info, "sem.myOpen")
   c.semConstExpr = semConstExpr
   c.semExpr = semExprNoFlags
   c.semConstBoolExpr = semConstBoolExpr
@@ -198,11 +207,14 @@ proc myProcess(context: PPassContext, n: PNode): PNode =
   if msgs.gErrorMax <= 1:
     result = SemStmtAndGenerateGenerics(c, n)
   else:
+    let oldContextLen = msgs.getInfoContextLen()
     try:
       result = SemStmtAndGenerateGenerics(c, n)
     except ERecoverableError:
       RecoverContext(c)
       result = ast.emptyNode
+      msgs.setInfoContextLen(oldContextLen)
+      if gCmd == cmdIdeTools: findSuggest(c, n)
   
 proc checkThreads(c: PContext) =
   if not needsGlobalAnalysis(): return
@@ -213,9 +225,8 @@ proc myClose(context: PPassContext, n: PNode): PNode =
   var c = PContext(context)
   closeScope(c.tab)         # close module's scope
   rawCloseScope(c.tab)      # imported symbols; don't check for unused ones!
-  if n == nil: 
-    result = newNode(nkStmtList)
-  else:
+  result = newNode(nkStmtList)
+  if n != nil:
     InternalError(n.info, "n is not nil") #result := n;
   addCodeForGenerics(c, result)
   if c.module.ast != nil:

@@ -15,7 +15,7 @@ type
     errUnknown,
     errClosingXExpected, errUnexpectedCharacter, errInvalidOperator,
     errXCantBeUsedAsPostfix, errXCantBeUsedAsPrefix,
-    errIllFormedAstX, errCannotOpenFile, errInternal, errGenerated, 
+    errIllFormedAstX, errInternal, errCannotOpenFile, errGenerated, 
     errXCompilerDoesNotSupportCpp, errStringLiteralExpected, 
     errIntLiteralExpected, errInvalidCharacterConstant, 
     errClosingTripleQuoteExpected, errClosingQuoteExpected, 
@@ -106,11 +106,13 @@ type
     warnUnknownSubstitutionX, warnLanguageXNotSupported, warnCommentXIgnored, 
     warnXisPassedToProcVar, warnAnalysisLoophole,
     warnDifferentHeaps, warnWriteToForeignHeap, warnImplicitClosure,
-    warnUser, 
+    warnEachIdentIsTuple, warnUser,
     hintSuccess, hintSuccessX, 
     hintLineTooLong, hintXDeclaredButNotUsed, hintConvToBaseNotNeeded, 
     hintConvFromXtoItselfNotNeeded, hintExprAlwaysX, hintQuitCalled, 
-    hintProcessing, hintCodeBegin, hintCodeEnd, hintConf, hintPath, hintUser
+    hintProcessing, hintCodeBegin, hintCodeEnd, hintConf, hintPath, 
+    hintConditionAlwaysTrue,
+    hintUser
 
 const 
   MsgKindToStr*: array[TMsgKind, string] = [
@@ -121,8 +123,8 @@ const
     errXCantBeUsedAsPostfix: "$1 can't be used as postfix operator",
     errXCantBeUsedAsPrefix: "$1 can't be used as prefix operator",
     errIllFormedAstX: "illformed AST: $1",
-    errCannotOpenFile: "cannot open \'$1\'", 
     errInternal: "internal error: $1", 
+    errCannotOpenFile: "cannot open \'$1\'", 
     errGenerated: "$1", 
     errXCompilerDoesNotSupportCpp: "\'$1\' compiler does not support C++", 
     errStringLiteralExpected: "string literal expected", 
@@ -354,6 +356,7 @@ const
     warnDifferentHeaps: "possible inconsistency of thread local heaps [DifferentHeaps]",
     warnWriteToForeignHeap: "write to foreign heap [WriteToForeignHeap]",
     warnImplicitClosure: "implicit closure convention: '$1' [ImplicitClosure]",
+    warnEachIdentIsTuple: "each identifier is a tuple [EachIdentIsTuple]",
     warnUser: "$1 [User]", 
     hintSuccess: "operation successful [Success]", 
     hintSuccessX: "operation successful ($# lines compiled; $# sec total; $#) [SuccessX]", 
@@ -368,22 +371,23 @@ const
     hintCodeEnd: "end of listing [CodeEnd]", 
     hintConf: "used config file \'$1\' [Conf]", 
     hintPath: "added path: '$1' [Path]",
+    hintConditionAlwaysTrue: "condition is always true: '$1' [CondTrue]",
     hintUser: "$1 [User]"]
 
 const
-  WarningsToStr*: array[0..17, string] = ["CannotOpenFile", "OctalEscape", 
+  WarningsToStr*: array[0..18, string] = ["CannotOpenFile", "OctalEscape", 
     "XIsNeverRead", "XmightNotBeenInit",
     "Deprecated", "ConfigDeprecated",
     "SmallLshouldNotBeUsed", "UnknownMagic", 
     "RedefinitionOfLabel", "UnknownSubstitutionX", "LanguageXNotSupported", 
     "CommentXIgnored", "XisPassedToProcVar",
     "AnalysisLoophole", "DifferentHeaps", "WriteToForeignHeap",
-    "ImplicitClosure,", "User"]
+    "ImplicitClosure", "EachIdentIsTuple", "User"]
 
-  HintsToStr*: array[0..13, string] = ["Success", "SuccessX", "LineTooLong", 
+  HintsToStr*: array[0..14, string] = ["Success", "SuccessX", "LineTooLong", 
     "XDeclaredButNotUsed", "ConvToBaseNotNeeded", "ConvFromXtoItselfNotNeeded", 
     "ExprAlwaysX", "QuitCalled", "Processing", "CodeBegin", "CodeEnd", "Conf", 
-    "Path",
+    "Path", "CondTrue",
     "User"]
 
 const 
@@ -472,6 +476,7 @@ var
   gHintCounter*: int = 0
   gWarnCounter*: int = 0
   gErrorMax*: int = 1         # stop after gErrorMax errors
+  gSilence*: int              # == 0 if we produce any output at all 
   
 # this format is understood by many text editors: it is the same that
 # Borland and Freepascal use
@@ -491,6 +496,9 @@ proc UnknownLineInfo*(): TLineInfo =
 
 var 
   msgContext: seq[TLineInfo] = @[]
+
+proc getInfoContextLen*(): int = return msgContext.len
+proc setInfoContextLen*(L: int) = setLen(msgContext, L)
 
 proc pushInfoContext*(info: TLineInfo) = 
   msgContext.add(info)
@@ -542,12 +550,13 @@ proc addCheckpoint*(filename: string, line: int) =
 
 proc OutWriteln*(s: string) = 
   ## Writes to stdout. Always.
-  Writeln(stdout, s)
+  if gSilence == 0: Writeln(stdout, s)
  
 proc MsgWriteln*(s: string) = 
   ## Writes to stdout. If --stdout option is given, writes to stderr instead.
-  if optStdout in gGlobalOptions: Writeln(stderr, s)
-  else: Writeln(stdout, s)
+  if gSilence == 0:
+    if optStdout in gGlobalOptions: Writeln(stderr, s)
+    else: Writeln(stdout, s)
 
 proc coordToStr(coord: int): string = 
   if coord == -1: result = "???"
@@ -666,16 +675,19 @@ proc GlobalError*(info: TLineInfo, msg: TMsgKind, arg = "") =
   liMessage(info, msg, arg, doRaise)
 
 proc LocalError*(info: TLineInfo, msg: TMsgKind, arg = "") =
+  if gCmd == cmdIdeTools and gErrorCounter > 10: return
   liMessage(info, msg, arg, doNothing)
 
 proc Message*(info: TLineInfo, msg: TMsgKind, arg = "") =
   liMessage(info, msg, arg, doNothing)
 
 proc InternalError*(info: TLineInfo, errMsg: string) = 
+  if gCmd == cmdIdeTools: return
   writeContext(info)
   liMessage(info, errInternal, errMsg, doAbort)
 
 proc InternalError*(errMsg: string) = 
+  if gCmd == cmdIdeTools: return
   writeContext(UnknownLineInfo())
   rawMessage(errInternal, errMsg)
 
@@ -685,4 +697,3 @@ template AssertNotNil*(e: expr): expr =
 
 template InternalAssert*(e: bool): stmt =
   if not e: InternalError($InstantiationInfo())
-

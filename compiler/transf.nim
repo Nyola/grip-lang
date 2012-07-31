@@ -49,7 +49,6 @@ type
     nestedProcs: int         # > 0 if we are in a nested proc
     contSyms, breakSyms: seq[PSym]  # to transform 'continue' and 'break'
     inLoop: int              # > 0 if we are in a loop
-    transformedInnerProcs: TIntSet
   PTransf = ref TTransfContext
 
 proc newTransNode(a: PNode): PTransNode {.inline.} = 
@@ -244,7 +243,16 @@ proc transformConstSection(c: PTransf, v: PNode): PTransNode =
         result[i] = PTransNode(b)
       else:
         result[i] = PTransNode(it)
-  
+
+proc trivialBody(s: PSym): PNode =
+  # a routine's body is trivially inlinable if marked as 'inline' and its
+  # body consists of only 1 statement. It is important that we perform this
+  # optimization here as 'distinct strings' may cause string copying otherwise:
+  # proc xml(s: string): TXmlString = return xmlstring(s)
+  # We have to generate a ``nkLineTracking`` node though to not lose
+  # debug information:
+  # XXX to implement
+  nil
 
 proc hasContinue(n: PNode): bool = 
   case n.kind
@@ -744,7 +752,6 @@ proc openTransf(module: PSym, filename: string): PPassContext =
   n.contSyms = @[]
   n.breakSyms = @[]
   n.module = module
-  n.transformedInnerProcs = initIntSet()
   result = n
 
 proc openTransfCached(module: PSym, filename: string, 

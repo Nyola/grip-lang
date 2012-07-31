@@ -72,7 +72,7 @@ type
   PASN1_UTCTIME* = SslPtr
   PASN1_cInt* = SslPtr
   PPasswdCb* = SslPtr
-  PFunction* = proc ()
+  PFunction* = proc () {.cdecl.}
   DES_cblock* = array[0..7, int8]
   PDES_cblock* = ptr DES_cblock
   des_ks_struct*{.final.} = object 
@@ -209,13 +209,15 @@ proc SSL_CTX_new*(meth: PSSL_METHOD): PSSL_CTX{.cdecl,
 proc SSL_CTX_load_verify_locations*(ctx: PSSL_CTX, CAfile: cstring,
     CApath: cstring): cInt{.cdecl, dynlib: DLLSSLName, importc.}
 proc SSL_CTX_free*(arg0: PSSL_CTX){.cdecl, dynlib: DLLSSLName, importc.}
-proc SSL_CTX_set_verify*(s: PSSL_CTX, mode: int, cb: proc (a: int, b: pointer): int){.cdecl, dynlib: DLLSSLName, importc.}
+proc SSL_CTX_set_verify*(s: PSSL_CTX, mode: int, cb: proc (a: int, b: pointer): int {.cdecl.}){.cdecl, dynlib: DLLSSLName, importc.}
 proc SSL_get_verify_result*(ssl: PSSL): int{.cdecl,
     dynlib: DLLSSLName, importc.}
 
 proc SSL_CTX_set_cipher_list*(s: PSSLCTX, ciphers: cstring): cint{.cdecl, dynlib: DLLSSLName, importc.}
 proc SSL_CTX_use_certificate_file*(ctx: PSSL_CTX, filename: cstring, typ: cInt): cInt{.
-    cdecl, dynlib: DLLSSLName, importc.}
+    stdcall, dynlib: DLLSSLName, importc.}
+proc SSL_CTX_use_certificate_chain_file*(ctx: PSSL_CTX, filename: cstring): cInt{.
+    stdcall, dynlib: DLLSSLName, importc.}
 proc SSL_CTX_use_PrivateKey_file*(ctx: PSSL_CTX,
     filename: cstring, typ: cInt): cInt{.cdecl, dynlib: DLLSSLName, importc.}
 proc SSL_CTX_check_private_key*(ctx: PSSL_CTX): cInt{.cdecl, dynlib: DLLSSLName, 
@@ -255,6 +257,7 @@ proc ERR_print_errors_fp*(fp: TFile){.cdecl, dynlib: DLLSSLName, importc.}
 proc ERR_error_string*(e: cInt, buf: cstring): cstring{.cdecl, 
     dynlib: DLLUtilName, importc.}
 proc ERR_get_error*(): cInt{.cdecl, dynlib: DLLUtilName, importc.}
+proc ERR_peek_last_error*(): cInt{.cdecl, dynlib: DLLUtilName, importc.}
 
 proc OpenSSL_add_all_algorithms*(){.cdecl, dynlib: DLLSSLName, importc: "OPENSSL_add_all_algorithms_conf".}
 

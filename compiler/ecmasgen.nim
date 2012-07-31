@@ -351,11 +351,6 @@ const # magic checked op; magic unchecked op; checked op; unchecked op
     ["MulU", "MulU", "MulU($1, $2)", "MulU($1, $2)"], # MulU
     ["DivU", "DivU", "DivU($1, $2)", "DivU($1, $2)"], # DivU
     ["ModU", "ModU", "ModU($1, $2)", "ModU($1, $2)"], # ModU
-    ["AddU64", "AddU64", "AddU64($1, $2)", "AddU64($1, $2)"], # AddU64
-    ["SubU64", "SubU64", "SubU64($1, $2)", "SubU64($1, $2)"], # SubU64
-    ["MulU64", "MulU64", "MulU64($1, $2)", "MulU64($1, $2)"], # MulU64
-    ["DivU64", "DivU64", "DivU64($1, $2)", "DivU64($1, $2)"], # DivU64
-    ["ModU64", "ModU64", "ModU64($1, $2)", "ModU64($1, $2)"], # ModU64
     ["", "", "($1 == $2)", "($1 == $2)"], # EqI
     ["", "", "($1 <= $2)", "($1 <= $2)"], # LeI
     ["", "", "($1 < $2)", "($1 < $2)"], # LtI
@@ -1190,7 +1185,7 @@ proc genRepr(p: var TProc, n: PNode, r: var TCompRes) =
 
 proc genOf(p: var TProc, n: PNode, r: var TCompRes) =
   var x: TCompRes
-  let t = skipTypes(n.sons[2].typ, abstractVarRange+{tyRef, tyPtr})
+  let t = skipTypes(n.sons[2].typ, abstractVarRange+{tyRef, tyPtr, tyTypeDesc})
   gen(p, n.sons[1], x)
   if tfFinal in t.flags:
     r.res = ropef("($1.m_type == $2)", [x.res, genTypeInfo(p, t)])

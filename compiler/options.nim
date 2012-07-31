@@ -51,10 +51,12 @@ type                          # please make sure we have under 32 options
     optSuggest,               # ideTools: 'suggest'
     optContext,               # ideTools: 'context'
     optDef,                   # ideTools: 'def'
+    optUsages,                # ideTools: 'usages'
     optThreadAnalysis,        # thread analysis pass
     optTaintMode,             # taint mode turned on
     optTlsEmulation,          # thread var emulation turned on
-    optGenIndex               # generate index file for documentation
+    optGenIndex               # generate index file for documentation;
+                              # also: generate header file
 
   TGlobalOptions* = set[TGlobalOption]
   TCommands* = enum           # Nimrod's commands
@@ -85,6 +87,7 @@ var
   gExitcode*: int8
   searchPaths*: TLinkedList
   outFile*: string = ""
+  headerFile*: string = ""
   gCmd*: TCommands = cmdNone  # the command
   gVerbosity*: int            # how verbose the compiler is
   gNumberOfProcessors*: int   # number of processors

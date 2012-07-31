@@ -63,6 +63,7 @@ type
                                # store this info in the syms themselves!)
     InGenericContext*: int     # > 0 if we are in a generic
     InUnrolledContext*: int    # > 0 if we are unrolling a loop
+    InCompilesContext*: int    # > 0 if we are in a ``compiles`` magic
     converters*: TSymSeq       # sequence of converters
     optionStack*: TLinkedList
     libs*: TLinkedList         # all libs used by this module
@@ -77,10 +78,40 @@ type
 var
   gGenericsCache: PGenericsCache # save for modularity
 
-proc newGenericsCache: PGenericsCache =
+proc newGenericsCache*(): PGenericsCache =
   new(result)
   initIdTable(result.InstTypes)
   result.generics = @[]
+
+proc tempContext*(c: PContext): PContext =
+  ## generates a temporary context so that side-effects can be rolled-back;
+  ## necessary for ``system.compiles``.
+  new(result)
+  result.module = c.module
+  result.p = c.p
+  # don't use the old cache:
+  result.generics = newGenericsCache()
+  result.friendModule = c.friendModule
+  result.InstCounter = c.InstCounter
+  result.threadEntries = @[]
+  # hrm, 'tab' is expensive to copy ... so we don't. We open a new scope
+  # instead to be able to undo scope changes. Not entirely correct for
+  # explicit 'global' vars though:
+  #shallowCopy(result.tab, c.tab)
+  assign(result.AmbiguousSymbols, c.AmbiguousSymbols)
+  result.InGenericContext = c.InGenericContext
+  result.InUnrolledContext = c.InUnrolledContext
+  result.InCompilesContext = c.InCompilesContext
+  result.converters = c.converters
+  result.semConstExpr = c.semConstExpr
+  result.semExpr = c.semExpr
+  result.semConstBoolExpr = c.semConstBoolExpr
+  assign(result.includedFiles, c.includedFiles) 
+  result.filename = c.filename
+  #shallowCopy(result.userPragmas, c.userPragmas) 
+  # XXX mark it as read-only:
+  result.evalContext = c.evalContext
+  
 
 proc newContext*(module: PSym, nimfile: string): PContext
 
@@ -100,7 +131,7 @@ proc PushOwner*(owner: PSym)
 proc PopOwner*()
 # implementation
 
-var gOwners: seq[PSym] = @[]
+var gOwners*: seq[PSym] = @[]
 
 proc getCurrOwner(): PSym = 
   # owner stack (used for initializing the
@@ -115,14 +146,16 @@ proc PushOwner(owner: PSym) =
 
 proc PopOwner() = 
   var length = len(gOwners)
-  if (length <= 0): InternalError("popOwner")
-  setlen(gOwners, length - 1)
+  if length > 0: setlen(gOwners, length - 1)
+  else: InternalError("popOwner")
 
 proc lastOptionEntry(c: PContext): POptionEntry = 
   result = POptionEntry(c.optionStack.tail)
 
 proc pushProcCon*(c: PContext, owner: PSym) {.inline.} = 
-  if owner == nil: InternalError("owner is nil")
+  if owner == nil: 
+    InternalError("owner is nil")
+    return
   var x: PProcCon
   new(x)
   x.owner = owner
@@ -192,6 +225,10 @@ proc makeTypeDesc*(c: PContext, typ: PType): PType =
 
 proc newTypeS(kind: TTypeKind, c: PContext): PType = 
   result = newType(kind, getCurrOwner())
+
+proc errorType*(c: PContext): PType =
+  ## creates a type representing an error state
+  result = newTypeS(tyEmpty, c)
 
 proc fillTypeS(dest: PType, kind: TTypeKind, c: PContext) = 
   dest.kind = kind

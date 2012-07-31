@@ -13,8 +13,9 @@ Advanced commands:
   //idetools                compiler support for IDEs: possible options:
     --track:FILE,LINE,COL   track a file/cursor position
     --suggest               suggest all possible symbols at position
-    --def                   list all possible symbols at position
+    --def                   list all possible definitions at position
     --context               list possible invokation context
+    --usages                list all usages of the symbol at position
 
 Advanced options:
   -m, --mainmodule:FILE     set the project main module
@@ -29,6 +30,8 @@ Advanced options:
   --import:PATH             add an automatically imported module
   --include:PATH            add an automatically included module
   --nimcache:PATH           set the path used for generated files
+  --header:FILE             the compiler should produce a .h file (FILE
+                            is optional)
   -c, --compileOnly         compile only; do not assemble or link
   --noLinking               compile but do not link
   --noMain                  do not generate a main procedure

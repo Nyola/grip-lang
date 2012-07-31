@@ -44,45 +44,56 @@ proc getStrLit(m: BModule, s: string): PRope =
   appf(m.s[cfsData], "STRING_LITERAL($1, $2, $3);$n",
        [result, makeCString(s), ToRope(len(s))])
 
-proc genLiteral(p: BProc, v: PNode, ty: PType): PRope =
-  if ty == nil: internalError(v.info, "genLiteral: ty is nil")
-  case v.kind
+proc genLiteral(p: BProc, n: PNode, ty: PType): PRope =
+  if ty == nil: internalError(n.info, "genLiteral: ty is nil")
+  case n.kind
   of nkCharLit..nkUInt64Lit:
     case skipTypes(ty, abstractVarRange).kind
     of tyChar, tyInt64, tyNil:
-      result = intLiteral(v.intVal)
+      result = intLiteral(n.intVal)
     of tyInt:
-      if (v.intVal >= low(int32)) and (v.intVal <= high(int32)):
-        result = int32Literal(int32(v.intVal))
+      if (n.intVal >= low(int32)) and (n.intVal <= high(int32)):
+        result = int32Literal(int32(n.intVal))
       else:
-        result = intLiteral(v.intVal)
+        result = intLiteral(n.intVal)
     of tyBool:
-      if v.intVal != 0: result = toRope("NIM_TRUE")
+      if n.intVal != 0: result = toRope("NIM_TRUE")
       else: result = toRope("NIM_FALSE")
     else:
       result = ropef("(($1) $2)", [getTypeDesc(p.module,
-          skipTypes(ty, abstractVarRange)), intLiteral(v.intVal)])
+          skipTypes(ty, abstractVarRange)), intLiteral(n.intVal)])
   of nkNilLit:
-    result = toRope("NIM_NIL")
+    let t = skipTypes(ty, abstractVarRange)
+    if t.kind == tyProc and t.callConv == ccClosure:
+      var id = NodeTableTestOrSet(p.module.dataCache, n, gBackendId)
+      result = con("TMP", toRope(id))
+      if id == gBackendId:
+        # not found in cache:
+        inc(gBackendId)
+        appf(p.module.s[cfsData],
+             "static NIM_CONST $1 $2 = {NIM_NIL,NIM_NIL};$n",
+             [getTypeDesc(p.module, t), result])
+    else:
+      result = toRope("NIM_NIL")
   of nkStrLit..nkTripleStrLit:
     if skipTypes(ty, abstractVarRange).kind == tyString:
-      var id = NodeTableTestOrSet(p.module.dataCache, v, gBackendId)
+      var id = NodeTableTestOrSet(p.module.dataCache, n, gBackendId)
       if id == gBackendId:
         # string literal not found in the cache:
         result = ropecg(p.module, "((#NimStringDesc*) &$1)", 
-                        [getStrLit(p.module, v.strVal)])
+                        [getStrLit(p.module, n.strVal)])
       else:
         result = ropecg(p.module, "((#NimStringDesc*) &TMP$1)", [toRope(id)])
     else:
-      result = makeCString(v.strVal)
+      result = makeCString(n.strVal)
   of nkFloatLit..nkFloat64Lit:
-    result = toRope(v.floatVal.ToStrMaxPrecision)
+    result = toRope(n.floatVal.ToStrMaxPrecision)
   else:
-    InternalError(v.info, "genLiteral(" & $v.kind & ')')
+    InternalError(n.info, "genLiteral(" & $n.kind & ')')
     result = nil
 
-proc genLiteral(p: BProc, v: PNode): PRope =
-  result = genLiteral(p, v, v.typ)
+proc genLiteral(p: BProc, n: PNode): PRope =
+  result = genLiteral(p, n, n.typ)
 
 proc bitSetToWord(s: TBitSet, size: int): BiggestInt =
   result = 0
@@ -430,11 +441,6 @@ proc binaryArith(p: BProc, e: PNode, d: var TLoc, op: TMagic) =
       "($4)((NU$3)($1) * (NU$3)($2))", # MulU
       "($4)((NU$3)($1) / (NU$3)($2))", # DivU
       "($4)((NU$3)($1) % (NU$3)($2))", # ModU
-      "($4)((NU64)($1) + (NU64)($2))", # AddU64
-      "($4)((NU64)($1) - (NU64)($2))", # SubU64
-      "($4)((NU64)($1) * (NU64)($2))", # MulU64
-      "($4)((NU64)($1) / (NU64)($2))", # DivU64
-      "($4)((NU64)($1) % (NU64)($2))", # ModU64
       "($1 == $2)",           # EqI
       "($1 <= $2)",           # LeI
       "($1 < $2)",            # LtI
@@ -518,7 +524,7 @@ proc unaryArith(p: BProc, e: PNode, d: var TLoc, op: TMagic) =
       "(($3)(NU32)(NU64)($1))", # ToU32
       "((double) ($1))",      # ToFloat
       "((double) ($1))",      # ToBiggestFloat
-      "float64ToInt32($1)",   # ToInt XXX: this is not correct!
+      "float64ToInt32($1)",   # ToInt
       "float64ToInt64($1)"]   # ToBiggestInt
   var
     a: TLoc
@@ -1018,18 +1024,18 @@ proc genNewFinalize(p: BProc, e: PNode) =
 proc genOf(p: BProc, x: PNode, typ: PType, d: var TLoc) =
   var a: TLoc
   initLocExpr(p, x, a)
-  var dest = skipTypes(typ, abstractPtrs)
+  var dest = skipTypes(typ, typedescPtrs)
   var r = rdLoc(a)
   var nilCheck: PRope = nil
   var t = skipTypes(a.t, abstractInst)
   while t.kind in {tyVar, tyPtr, tyRef}:
     if t.kind != tyVar: nilCheck = r
     r = ropef("(*$1)", [r])
-    t = skipTypes(t.sons[0], abstractInst)
+    t = skipTypes(t.sons[0], typedescInst)
   if gCmd != cmdCompileToCpp:
     while (t.kind == tyObject) and (t.sons[0] != nil):
       app(r, ".Sup")
-      t = skipTypes(t.sons[0], abstractInst)
+      t = skipTypes(t.sons[0], typedescInst)
   if nilCheck != nil:
     r = ropecg(p.module, "(($1) && #isObj($2.m_type, $3))",
               [nilCheck, r, genTypeInfo(p.module, dest)])
@@ -1310,12 +1316,15 @@ proc genCast(p: BProc, e: PNode, d: var TLoc) =
 proc genRangeChck(p: BProc, n: PNode, d: var TLoc, magic: string) =
   var a: TLoc
   var dest = skipTypes(n.typ, abstractVar)
-  if optRangeCheck notin p.options:
+  # range checks for unsigned turned out to be buggy and annoying:
+  if optRangeCheck notin p.options or dest.kind in {tyUInt..tyUInt64}:
     InitLocExpr(p, n.sons[0], a)
     putIntoDest(p, d, n.typ, ropef("(($1) ($2))",
         [getTypeDesc(p.module, dest), rdCharLoc(a)]))
   else:
     InitLocExpr(p, n.sons[0], a)
+    if leValue(n.sons[2], n.sons[1]):
+      InternalError(n.info, "range check will always fail; empty range")
     putIntoDest(p, d, dest, ropecg(p.module, "(($1)#$5($2, $3, $4))", [
         getTypeDesc(p.module, dest), rdCharLoc(a),
         genLiteral(p, n.sons[1], dest), genLiteral(p, n.sons[2], dest),

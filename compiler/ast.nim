@@ -382,7 +382,8 @@ const
 type
   TMagic* = enum # symbols that require compiler magic:
     mNone,
-    mDefined, mDefinedInScope, mLow, mHigh, mSizeOf, mTypeTrait, mIs, mOf,
+    mDefined, mDefinedInScope, mCompiles,
+    mLow, mHigh, mSizeOf, mTypeTrait, mIs, mOf,
     mEcho, mShallowCopy, mSlurp, mStaticExec,
     mParseExprToAst, mParseStmtToAst, mExpandToAst,
     mUnaryLt, mSucc, 
@@ -394,7 +395,7 @@ type
     mShrI, mShlI, mBitandI, mBitorI, mBitxorI, mMinI, mMaxI, 
     mShrI64, mShlI64, mBitandI64, mBitorI64, mBitxorI64, mMinI64, mMaxI64,
     mMinF64, mMaxF64, mAddU, mSubU, mMulU, 
-    mDivU, mModU, mAddU64, mSubU64, mMulU64, mDivU64, mModU64, mEqI, mLeI,
+    mDivU, mModU, mEqI, mLeI,
     mLtI, 
     mEqI64, mLeI64, mLtI64, mEqF64, mLeF64, mLtF64, 
     mLeU, mLtU, mLeU64, mLtU64, 
@@ -445,7 +446,7 @@ const
     mShrI, mShlI, mBitandI, mBitorI, mBitxorI, mMinI, mMaxI, 
     mShrI64, mShlI64, mBitandI64, mBitorI64, mBitxorI64, mMinI64, mMaxI64,
     mMinF64, mMaxF64, mAddU, mSubU, mMulU, 
-    mDivU, mModU, mAddU64, mSubU64, mMulU64, mDivU64, mModU64, mEqI, mLeI,
+    mDivU, mModU, mEqI, mLeI,
     mLtI, 
     mEqI64, mLeI64, mLtI64, mEqF64, mLeF64, mLtF64, 
     mLeU, mLtU, mLeU64, mLtU64, 
@@ -1091,6 +1092,14 @@ proc lastSon(n: PType): PType =
 proc hasSonWith(n: PNode, kind: TNodeKind): bool = 
   for i in countup(0, sonsLen(n) - 1): 
     if n.sons[i].kind == kind: 
+      return true
+  result = false
+
+proc hasNilSon*(n: PNode): bool = 
+  for i in countup(0, safeLen(n) - 1): 
+    if n.sons[i] == nil: 
+      return true
+    elif hasNilSon(n.sons[i]):
       return true
   result = false
 
