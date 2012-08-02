@@ -38,6 +38,8 @@ type
     wMagic, wThread, wFinal, wProfiler, wObjChecks,
 
     wDestroy,
+
+    wDef, wFn,
     
     wImmediate, wDestructor, wImportCpp, wImportObjC,
     wImportCompilerProc,
@@ -117,6 +119,8 @@ const
 
     "destroy",
     
+    "def", "fn",
+
     "immediate", "destructor", "importcpp", "importobjc",
     "importcompilerproc", "importc", "exportc", "incompletestruct",
     "align", "nodecl", "pure", "sideeffect",
