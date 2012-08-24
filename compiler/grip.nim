@@ -68,7 +68,7 @@ proc getOp(id: PIdent): TOpData =
   of ";":
     ret(50, {Left, Infix, CallBreaker})
   of "=", "+=", "-=", "*=", "/=", "%=", "<<=", ">>=", "^=", "&=":
-    ret(60, {Right, Infix, CallBreaker})
+    ret(60, {Left, Infix, CallBreaker})
   of "if", "unless", "while", "for":
     ret(70, {Right, Infix, CallBreaker})
   of "else":
@@ -295,14 +295,19 @@ proc scanWhiteSpace(g: PGripFile, pos: var TPos): TWhiteSpace =
     if c == ' ': result.spaces += 1
     else: result.tabs += 1
 
+const nkLiterals = { nkIntLit, nkStrLit, nkFloatLit }
+
 proc sexp(id: Pnode, sons: openarray[PNode]): PNode =
-  case id.ident.id
-  of ord(wDot):
-    result = newNode(nkDotExpr, id.info, sons[0..1])
+  if id.kind == nkIdent:
+    if id.ident.id == ord(wDot):
+      result = newNode(nkDotExpr, id.info, sons[0..1])
+    else:
+      result = newNodeI(nkCall, id.info)
+      result.sons = @[id]
+      result.sons.add(sons)
   else:
-    result = newNodeI(nkCall, id.info)
-    result.sons = @[id]
-    result.sons.add(sons)
+    internalAssert sons.len == 0
+    return id
 
 proc parseCall(g: PGripFile, s, e: int): PNode
 proc parseExpr(g: PGripFile, pos: var TPos): PNode
@@ -418,10 +423,11 @@ proc parseBlock(g: PGripFile, pos: var TPos): PNode =
     echo indent, " BLOCK ELEM ", line
     debug call
     result.addSon(call)
-    if callEnd == totalLines or g.indents[callEnd] < indent: break
+    if callEnd >= totalLines or g.indents[callEnd] < indent: break
     line = callEnd
 
   pos = newPos(int16(callEnd), int16(0))
+  echo "BLOCK PARSED ", callEnd
 
 proc parseNestedBlock(g: PGripFile, pos: var TPos): PNode =
   var
@@ -436,9 +442,11 @@ proc parseNestedBlock(g: PGripFile, pos: var TPos): PNode =
     result = parseBlock(g, pos)
 
 proc parseBlockArgs(g: PGripFile, args, retType: PNode): PNode =
+  echo "PARSING BLOCK ARGS"
   result = newNode(nkFormalParams, args.info, @[retType])
   var pos = args.info.pos
   while pos < args.ends:
+    echo "PARSING NEXT ARG"
     result.addSon(parseExpr(g, pos))
 
 proc isEmpty(ws: TWhiteSpace): bool =
@@ -536,6 +544,11 @@ proc parseWsAndOps(g: PGripFile, pos: var TPos, n: PNode): PNode =
 
   result = expChain.expStack[0]
 
+proc hasNestedBlock(g: PGripFile, pos: TPos): bool =
+  return 
+    g.indents.len > pos.line and 
+    g.indents[pos.line] < g.indents[pos.line + 1]
+
 proc parsePrimaryExpr(g: PGripFile, pos: var TPos): PNode =
   var start = pos
   let c = charAt(g, pos)
@@ -564,6 +577,8 @@ proc parsePrimaryExpr(g: PGripFile, pos: var TPos): PNode =
       c = charAt(g, pos)
       body: PNode
 
+    args = parseBlockArgs(g, args, retType)
+    
     if c == ':':
       discard eatChar(g, pos)
       ws = scanWhiteSpace(g, pos)
@@ -578,7 +593,6 @@ proc parsePrimaryExpr(g: PGripFile, pos: var TPos): PNode =
       echo "trying nested block"
       body = parseNestedBlock(g, pos)
     
-    args = parseBlockArgs(g, args, retType)
     result = newNode(nkLambda, lineinfo(g, start), @[emptyNode, emptyNode, args, emptyNode, body])
 
   of '{':
@@ -623,13 +637,24 @@ proc parseCall(g: PGripFile, s, e: int): PNode =
       let callee = parseExpr(g, pos)
       echo "parsing call "
       debug callee
+      echo "after debyg"
       var call = sexp(callee)
+      echo "After sexp"
       callChain.pushExp(call)
+      echo "after call chain"
           
-      if isLineEnd(g, pos):
-        break ParseLine
+      if false and isLineEnd(g, pos):
+        # @@ Why was this needed?
+        if hasNestedBlock(g, pos):
+          var start = pos
+          var body = parseNestedBlock(g, pos)
+          var args = newNode(nkFormalParams, lineinfo(g, start), @[emptyNode])
+          call.addSon newNode(nkLambda, lineinfo(g, start), @[emptyNode, emptyNode, args, emptyNode, body])
+        else:
+          break ParseLine
       
       while true:
+        echo "PARSE CALL STEP"
         if g.breakCall:
           echo "CALL BROKEN by ", g.pendingOp.id.ident.s
           callChain.processOp(g.pendingOp)
@@ -637,10 +662,19 @@ proc parseCall(g: PGripFile, s, e: int): PNode =
           break
 
         if isLineEnd(g, pos):
-          break ParseLine
-
-        let param = parseExpr(g, pos)
-        call.addSon(param)
+          echo "LINE AT END"
+          if hasNestedBlock(g, pos):
+            echo "NESTED BLOCK"
+            var start = pos
+            var body = parseNestedBlock(g, pos)
+            var args = newNode(nkFormalParams, lineinfo(g, start), @[emptyNode])
+            call.addSon newNode(nkLambda, lineinfo(g, start), @[emptyNode, emptyNode, args, emptyNode, body])
+            break ParseLine
+          else:
+            break ParseLine
+        else:
+          let param = parseExpr(g, pos)
+          call.addSon(param)
   
   while callChain.opStackTop >= 0:
     popStacks(callChain)
@@ -653,6 +687,8 @@ proc parse(filename: string, stream: PLLStream): PNode =
     pos = newPos(int16(0), int16(0))
   
   result = parseBlock(g, pos)
+  echo "PARSE COMPLETE"
+  debug result
     
 proc carryPass(p: TPass, module: PSym, filename: string, m: TPassData): TPassData =
   var c = p.open(module, filename)
@@ -663,10 +699,10 @@ proc CompileGrip(module: PSym, filename: string, stream: PLLStream) =
   var nodes = parse(filename, stream)
 
   var nimSem = semPass()
-  var c = nimSem.open(module, filename)
+  var c = nimSem.open(module, filename).PContext
+  c.InGripContext = true
   
   for i in 0.. <nodes.sonsLen:
-    debug nodes[i]
     nodes.sons[i] = semGrip(c, nodes[i])
   
   var passData = (input: nodes, closeOutput: nimSem.close(c, nil))

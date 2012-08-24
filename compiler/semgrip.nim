@@ -1,39 +1,60 @@
 # included from sem.nim
 
-import macros
+proc preSemGrip*(c: PContext, n: PNode): PNode
 
-dumpTree:
-  for x,y in 1..10:
-    echo "Bar"
+proc gripStmtList(c: PContext, n: PNode): PNode =
+  if n.kind == nkLambda:
+    echo "LAMBDA ", n.sonsLen
+    result = n[4]
+  else:
+    result = n
 
-proc toStmtList(n: PNode): PNode =
-  result = n
+  for i in 0 .. <result.len:
+    result.sons[i] = preSemGrip(c, result[i])
 
-proc toIfStmt(n: PNode): PNode =
+proc gripIf(c: PContext, n: PNode): PNode =
   result = newNode(nkIfStmt, n.info, @[
-    newNode(nkElifBranch, n.info, @[n[2], n[3].toStmtList])
+    newNode(nkElifBranch, n.info, @[n[1], gripStmtList(c, n[2])])
   ])
 
-proc buildIfFromElse(n: PNode): Pnode =
+proc buildIfFromElse(c: PContext, n: PNode): PNode =
   let previous = n[1]
   case previous.ident.id
   of ord(wIf):
-    result = previous.toIfStmt
+    result = gripIf(c, previous)
   of ord(wElse):
-    result = previous.buildIfFromElse
+    result = buildIfFromElse(c, previous)
   else:
     internalAssert false
 
-  result.addSon(newNode(nkElse, n.info, @[n[2].toStmtList]))
+  result.addSon(newNode(nkElse, n.info, @[gripStmtList(c, n[2])]))
 
-proc semGrip*(context: PPassContext, n: PNode): PNode =
-  var c = PContext(context)
-  template nim(n) =
-    result = myProcess(context, n)
+proc tryConst(c: PContext, n: PNode): PNode =
+  result  = semExprWithType(c, n)
+  if result != nil:
+    result = evalConstExpr(c.module, result)
 
+const skVars = {skVar, skLet, skForVar, skParam}
+
+proc newVarSection(lhs, rhs: PNode, isConst: bool): PNode =
+  var sectionKind, defKind: TNodeKind
+  if isConst:
+    sectionKind = nkConstSection
+    defKind = nkConstDef
+  else:
+    sectionKind = nkVarSection
+    defKind = nkIdentDefs
+
+  result = newNode(sectionKind, lhs.info, @[
+    newNode(defKind, lhs.info, @[lhs, emptyNode, rhs])
+  ])
+
+proc preSemGrip(c: PContext, n: PNode): PNode =
+  result = n
+  
   echo "ENTERING SEM GRIP"
   debug n
-
+  
   if n.kind == nkCall:
     case n.sons[0].ident.id
     of ord(wDef):
@@ -48,18 +69,45 @@ proc semGrip*(context: PPassContext, n: PNode): PNode =
           params.sons[i] = newNode(nkIdentDefs, exp.info, @[exp[1], exp[2], emptyNode])
   
       def.kind = nkProcDef
-      nim(def)
+      result = def
+    of ord(wEquals):
+      checkSonsLen n, 3
+      if n[1].kind == nkCall and n[1].sonsLen == 1 and n[1][0].kind == nkIdent:
+        let
+          lhs = n[1][0]
+          rhs = n[2]
+          rhsAsConst = tryConst(c, rhs)
+
+        if rhsAsConst != nil:
+          result = newVarSection(lhs, rhsAsConst, true)
+        else:
+          var existingVar = SymTabGet(c.tab, lhs.ident, skVars)
+          if existingVar != nil:
+            let varSym = semSym(c, lhs, existingVar, {})
+            result = newNode(nkAsgn, n.info, @[varSym, rhs])
+          else:
+            result = newVarSection(lhs, rhs, false)
+
+      else:
+        echo "BAD ASSIGNMENT"
+
+      echo "DECLARING VAR"
+      debug result
+      
     of ord(wIf):
-      nim(n.toIfStmt)
+      result = gripIf(c, n)
     of ord(wElse):
-      result = n.buildIfFromElse
-      nim(result)
+      result = buildIfFromElse(c, n)
     of ord(wFor):
       echo "for"
     of ord(wWhile):
       echo "while"
     else:
-      nim(n)
-
+      nil
+  
   echo "EXITING SEM GRIP"
+
+proc semGrip*(c: PContext, n: PNode): PNode =
+  result = preSemGrip(c, n)
+  result = myProcess(c, result)
 

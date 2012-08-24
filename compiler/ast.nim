@@ -553,6 +553,7 @@ type
     name*: PIdent
     info*: TLineInfo
     owner*: PSym
+    next*: PSym
     flags*: TSymFlags
     tab*: TStrTable           # interface table for modules
     ast*: PNode               # syntax tree of proc, iterator, etc.:

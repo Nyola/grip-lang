@@ -61,6 +61,7 @@ type
     tab*: TSymTab              # each module has its own symbol table
     AmbiguousSymbols*: TIntSet # ids of all ambiguous symbols (cannot
                                # store this info in the syms themselves!)
+    InGripContext*: bool       # compiling grip file
     InGenericContext*: int     # > 0 if we are in a generic
     InUnrolledContext*: int    # > 0 if we are unrolling a loop
     InCompilesContext*: int    # > 0 if we are in a ``compiles`` magic
