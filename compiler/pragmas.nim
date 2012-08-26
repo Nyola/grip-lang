@@ -23,16 +23,17 @@ const
     wMagic, wNosideEffect, wSideEffect, wNoreturn, wDynLib, wHeader, 
     wCompilerProc, wProcVar, wDeprecated, wVarargs, wCompileTime, wMerge, 
     wBorrow, wExtern, wImportCompilerProc, wThread, wImportCpp, wImportObjC,
-    wNoStackFrame, wError, wDiscardable, wNoInit, wDestructor, wHoist}
+    wNoStackFrame, wError, wDiscardable, wNoInit, wDestructor, wHoist,
+    wGenSym, wInject}
   converterPragmas* = procPragmas
   methodPragmas* = procPragmas
-  templatePragmas* = {wImmediate, wDeprecated, wError}
+  templatePragmas* = {wImmediate, wDeprecated, wError, wGenSym, wInject, wDirty}
   macroPragmas* = {FirstCallConv..LastCallConv, wImmediate, wImportc, wExportc,
     wNodecl, wMagic, wNosideEffect, wCompilerProc, wDeprecated, wExtern,
-    wImportcpp, wImportobjc, wError, wDiscardable}
+    wImportcpp, wImportobjc, wError, wDiscardable, wGenSym, wInject}
   iteratorPragmas* = {FirstCallConv..LastCallConv, wNosideEffect, wSideEffect, 
     wImportc, wExportc, wNodecl, wMagic, wDeprecated, wBorrow, wExtern,
-    wImportcpp, wImportobjc, wError, wDiscardable}
+    wImportcpp, wImportobjc, wError, wDiscardable, wGenSym, wInject}
   exprPragmas* = {wLine}
   stmtPragmas* = {wChecks, wObjChecks, wFieldChecks, wRangechecks,
     wBoundchecks, wOverflowchecks, wNilchecks, wAssertions, wWarnings, wHints,
@@ -46,14 +47,16 @@ const
     wDeprecated, wExtern, wThread, wImportcpp, wImportobjc, wNoStackFrame}
   typePragmas* = {wImportc, wExportc, wDeprecated, wMagic, wAcyclic, wNodecl, 
     wPure, wHeader, wCompilerProc, wFinal, wSize, wExtern, wShallow, 
-    wImportcpp, wImportobjc, wError, wIncompleteStruct}
+    wImportcpp, wImportobjc, wError, wIncompleteStruct, wByCopy, wByRef,
+    wInheritable, wGenSym, wInject}
   fieldPragmas* = {wImportc, wExportc, wDeprecated, wExtern, 
     wImportcpp, wImportobjc, wError}
   varPragmas* = {wImportc, wExportc, wVolatile, wRegister, wThreadVar, wNodecl, 
     wMagic, wHeader, wDeprecated, wCompilerProc, wDynLib, wExtern,
-    wImportcpp, wImportobjc, wError, wNoInit, wCompileTime, wGlobal}
+    wImportcpp, wImportobjc, wError, wNoInit, wCompileTime, wGlobal,
+    wGenSym, wInject}
   constPragmas* = {wImportc, wExportc, wHeader, wDeprecated, wMagic, wNodecl,
-    wExtern, wImportcpp, wImportobjc, wError}
+    wExtern, wImportcpp, wImportobjc, wError, wGenSym, wInject}
   letPragmas* = varPragmas
   procTypePragmas* = {FirstCallConv..LastCallConv, wVarargs, wNosideEffect,
                       wThread}
@@ -224,8 +227,9 @@ proc processDynLib(c: PContext, n: PNode, sym: PSym) =
       incl(sym.loc.flags, lfExportLib)
     # since we'll be loading the dynlib symbols dynamically, we must use
     # a calling convention that doesn't introduce custom name mangling
-    # cdecl is the default - the use can override this explicitly
-    if sym.typ.callConv == ccDefault:
+    # cdecl is the default - the user can override this explicitly
+    if sym.kind in RoutineKinds and sym.typ != nil and 
+        sym.typ.callConv == ccDefault:
       sym.typ.callConv = ccCDecl
 
 proc processNote(c: PContext, n: PNode) =
@@ -450,8 +454,7 @@ proc processPragma(c: PContext, n: PNode, i: int) =
   elif it.sons[0].kind != nkIdent: invalidPragma(n)
   elif it.sons[1].kind != nkIdent: invalidPragma(n)
   
-  var userPragma = NewSym(skTemplate, it.sons[1].ident, nil)
-  userPragma.info = it.info
+  var userPragma = NewSym(skTemplate, it.sons[1].ident, nil, it.info)
   var body = newNodeI(nkPragma, n.info)
   for j in i+1 .. sonsLen(n)-1: addSon(body, n.sons[j])
   userPragma.ast = body
@@ -482,8 +485,11 @@ proc pragma(c: PContext, sym: PSym, n: PNode, validPragmas: TSpecialWords) =
             processImportCompilerProc(sym, getOptionalStr(c, it, sym.name.s))
           of wExtern: setExternName(sym, expectStrLit(c, it))
           of wImmediate:
-            if sym.kind notin {skTemplate, skMacro}: invalidPragma(it)
-            incl(sym.flags, sfImmediate)
+            if sym.kind in {skTemplate, skMacro}: incl(sym.flags, sfImmediate)
+            else: invalidPragma(it)
+          of wDirty:
+            if sym.kind == skTemplate: incl(sym.flags, sfDirty)
+            else: invalidPragma(it)
           of wImportCpp:
             processImportCpp(sym, getOptionalStr(c, it, sym.name.s))
           of wImportObjC:
@@ -570,22 +576,26 @@ proc pragma(c: PContext, sym: PSym, n: PNode, validPragmas: TSpecialWords) =
           of wVarargs: 
             noVal(it)
             if sym.typ == nil: invalidPragma(it)
-            incl(sym.typ.flags, tfVarargs)
+            else: incl(sym.typ.flags, tfVarargs)
           of wBorrow: 
             noVal(it)
             incl(sym.flags, sfBorrow)
           of wFinal: 
             noVal(it)
             if sym.typ == nil: invalidPragma(it)
-            incl(sym.typ.flags, tfFinal)
-          of wAcyclic: 
+            else: incl(sym.typ.flags, tfFinal)
+          of wInheritable:
+            noVal(it)
+            if sym.typ == nil or tfFinal in sym.typ.flags: invalidPragma(it)
+            else: incl(sym.typ.flags, tfInheritable)
+          of wAcyclic:
             noVal(it)
             if sym.typ == nil: invalidPragma(it)
-            incl(sym.typ.flags, tfAcyclic)
+            else: incl(sym.typ.flags, tfAcyclic)
           of wShallow:
             noVal(it)
             if sym.typ == nil: invalidPragma(it)
-            incl(sym.typ.flags, tfShallow)
+            else: incl(sym.typ.flags, tfShallow)
           of wThread:
             noVal(it)
             incl(sym.flags, sfThread)
@@ -626,29 +636,41 @@ proc pragma(c: PContext, sym: PSym, n: PNode, validPragmas: TSpecialWords) =
           of wNoInit:
             noVal(it)
             if sym != nil: incl(sym.flags, sfNoInit)
-          of wByCopy:
-            noVal(it)
-            if sym != nil: incl(sym.flags, sfByCopy)
           of wHoist:
             noVal(it)
             if sym != nil: incl(sym.flags, sfHoist)
           of wChecks, wObjChecks, wFieldChecks, wRangechecks, wBoundchecks, 
              wOverflowchecks, wNilchecks, wAssertions, wWarnings, wHints, 
-             wLinedir, wStacktrace, wLinetrace, wOptimization, wByRef,
+             wLinedir, wStacktrace, wLinetrace, wOptimization,
              wCallConv, 
              wDebugger, wProfiler, wFloatChecks, wNanChecks, wInfChecks: 
             processOption(c, it) # calling conventions (boring...):
           of firstCallConv..lastCallConv: 
             assert(sym != nil)
             if sym.typ == nil: invalidPragma(it)
-            sym.typ.callConv = wordToCallConv(k)
+            else: sym.typ.callConv = wordToCallConv(k)
           of wEmit: PragmaEmit(c, it)
           of wUnroll: PragmaUnroll(c, it)
           of wLinearScanEnd: PragmaLinearScanEnd(c, it)
           of wIncompleteStruct:
             noVal(it)
             if sym.typ == nil: invalidPragma(it)
-            incl(sym.typ.flags, tfIncompleteStruct)
+            else: incl(sym.typ.flags, tfIncompleteStruct)
+          of wByRef:
+            noVal(it)
+            if sym == nil or sym.typ == nil:
+              processOption(c, it)
+            else:
+              incl(sym.typ.flags, tfByRef)
+          of wByCopy:
+            noVal(it)
+            if sym.kind != skType or sym.typ == nil: invalidPragma(it)
+            else: incl(sym.typ.flags, tfByCopy)
+          of wInject, wGenSym:
+            # We check for errors, but do nothing with these pragmas otherwise
+            # as they are handled directly in 'evalTemplate'.
+            noVal(it)
+            if sym == nil: invalidPragma(it)
           of wLine: PragmaLine(c, it)
           else: invalidPragma(it)
         else: invalidPragma(it)

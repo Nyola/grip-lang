@@ -10,7 +10,7 @@
 ## This module implements semantic checking for calls. 
 # included from sem.nim
 
-proc sameMethodDispatcher(a, b: PSym): bool = 
+proc sameMethodDispatcher(a, b: PSym): bool =
   result = false
   if a.kind == skMethod and b.kind == skMethod: 
     var aa = lastSon(a.ast)
@@ -71,8 +71,9 @@ proc resolveOverloads(c: PContext, n, orig: PNode,
     #writeMatches(alt)
     if c.inCompilesContext > 0: 
       # quick error message for performance of 'compiles' built-in:
-      LocalError(n.Info, errAmbiguousCallXYZ, "")
-    else:
+      GlobalError(n.Info, errAmbiguousCallXYZ, "")
+    elif gErrorCounter == 0:
+      # don't cascade errors
       var args = "("
       for i in countup(1, sonsLen(n) - 1):
         if i > 1: add(args, ", ")
@@ -86,15 +87,21 @@ proc resolveOverloads(c: PContext, n, orig: PNode,
 proc semResolvedCall(c: PContext, n: PNode, x: TCandidate): PNode =
   assert x.state == csMatch
   var finalCallee = x.calleeSym
-  markUsed(n, finalCallee)
+  markUsed(n.sons[0], finalCallee)
   if finalCallee.ast == nil:
     internalError(n.info, "calleeSym.ast is nil") # XXX: remove this check!
   if finalCallee.ast.sons[genericParamsPos].kind != nkEmpty:
     # a generic proc!
-    finalCallee = generateInstance(c, x.calleeSym, x.bindings, n.info)
-
+    if not x.proxyMatch:
+      finalCallee = generateInstance(c, x.calleeSym, x.bindings, n.info)
+    else:
+      result = x.call
+      result.sons[0] = newSymNode(finalCallee, result.sons[0].info)
+      result.typ = finalCallee.typ.sons[0]
+      if ContainsGenericType(result.typ): result.typ = errorType(c)
+      return
   result = x.call
-  result.sons[0] = newSymNode(finalCallee)
+  result.sons[0] = newSymNode(finalCallee, result.sons[0].info)
   result.typ = finalCallee.typ.sons[0]
 
 proc semOverloadedCall(c: PContext, n, nOrig: PNode,
@@ -125,11 +132,11 @@ proc explicitGenericInstantiation(c: PContext, n: PNode, s: PSym): PNode =
     if safeLen(s.ast.sons[genericParamsPos]) != n.len-1:
       return explicitGenericInstError(n)
     result = explicitGenericSym(c, n, s)
-  elif a.kind == nkSymChoice:
+  elif a.kind in {nkClosedSymChoice, nkOpenSymChoice}:
     # choose the generic proc with the proper number of type parameters.
     # XXX I think this could be improved by reusing sigmatch.ParamTypesMatch.
     # It's good enough for now.
-    result = newNodeI(nkSymChoice, n.info)
+    result = newNodeI(a.kind, n.info)
     for i in countup(0, len(a)-1): 
       var candidate = a.sons[i].sym
       if candidate.kind in {skProc, skMethod, skConverter, skIterator}: 
@@ -137,9 +144,24 @@ proc explicitGenericInstantiation(c: PContext, n: PNode, s: PSym): PNode =
         # type parameters:
         if safeLen(candidate.ast.sons[genericParamsPos]) == n.len-1:
           result.add(explicitGenericSym(c, n, candidate))
-    # get rid of nkSymChoice if not ambiguous:
-    if result.len == 1: result = result[0]
+    # get rid of nkClosedSymChoice if not ambiguous:
+    if result.len == 1 and a.kind == nkClosedSymChoice:
+      result = result[0]
     # candidateCount != 1: return explicitGenericInstError(n)
   else:
     result = explicitGenericInstError(n)
 
+proc SearchForBorrowProc(c: PContext, fn: PSym, tos: int): PSym =
+  # Searchs for the fn in the symbol table. If the parameter lists are suitable
+  # for borrowing the sym in the symbol table is returned, else nil.
+  # New approach: generate fn(x, y, z) where x, y, z have the proper types
+  # and use the overloading resolution mechanism:
+  var call = newNode(nkCall)
+  call.add(newIdentNode(fn.name, fn.info))
+  for i in 1.. <fn.typ.n.len:
+    let param = fn.typ.n.sons[i]
+    let t = skipTypes(param.typ, abstractVar)
+    call.add(newNodeIT(nkEmpty, fn.info, t.baseOfDistinct))
+  var resolved = semOverloadedCall(c, call, call, {fn.kind})
+  if resolved != nil:
+    result = resolved.sons[0].sym

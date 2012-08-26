@@ -16,7 +16,7 @@
 import 
   strutils, magicsys, lists, options, ast, astalgo, trees, treetab, nimsets, 
   msgs, os, condsyms, idents, renderer, types, passes, semfold, transf, 
-  parser, ropes, rodread, idgen, osproc, streams
+  parser, ropes, rodread, idgen, osproc, streams, evaltempl
 
 type 
   PStackFrame* = ref TStackFrame
@@ -254,7 +254,7 @@ proc getNullValue(typ: PType, info: TLineInfo): PNode =
     for i in countup(0, sonsLen(t) - 1): 
       var p = newNodeIT(nkExprColonExpr, info, t.sons[i])
       var field = if t.n != nil: t.n.sons[i].sym else: newSym(
-        skField, getIdent(":tmp" & $i), t.owner)
+        skField, getIdent(":tmp" & $i), t.owner, info)
       addSon(p, newSymNode(field, info))
       addSon(p, getNullValue(t.sons[i], info))
       addSon(result, p)
@@ -692,7 +692,8 @@ proc evalHigh(c: PEvalContext, n: PNode): PNode =
   result = evalAux(c, n.sons[1], {})
   if isSpecial(result): return 
   case skipTypes(n.sons[1].typ, abstractVar).kind
-  of tyOpenArray, tySequence: result = newIntNodeT(sonsLen(result)-1, n)
+  of tyOpenArray, tySequence, tyVarargs: 
+    result = newIntNodeT(sonsLen(result)-1, n)
   of tyString: result = newIntNodeT(len(result.strVal) - 1, n)
   else: InternalError(n.info, "evalHigh")
 
@@ -849,56 +850,6 @@ proc evalParseStmt(c: PEvalContext, n: PNode): PNode =
   result = parseString(code.getStrValue, code.info.toFilename,
                        code.stringStartingLine)
   result.typ = newType(tyStmt, c.module)
-
-proc evalTemplateAux*(templ, actual: PNode, sym: PSym): PNode = 
-  inc genSymBaseId
-  case templ.kind
-  of nkSym: 
-    var p = templ.sym
-    if (p.kind == skParam) and (p.owner.id == sym.id): 
-      result = copyTree(actual.sons[p.position])
-    else: 
-      result = copyNode(templ)
-  of nkNone..nkIdent, nkType..nkNilLit: # atom
-    result = copyNode(templ)
-  else: 
-    result = copyNode(templ)
-    newSons(result, sonsLen(templ))
-    for i in countup(0, sonsLen(templ) - 1): 
-      result.sons[i] = evalTemplateAux(templ.sons[i], actual, sym)
-
-proc evalTemplateArgs(n: PNode, s: PSym): PNode =
-  # if the template has zero arguments, it can be called without ``()``
-  # `n` is then a nkSym or something similar
-  var a: int
-  case n.kind
-  of nkCall, nkInfix, nkPrefix, nkPostfix, nkCommand, nkCallStrLit:
-    a = sonsLen(n)
-  else: a = 0
-  var f = s.typ.sonsLen
-  if a > f: GlobalError(n.info, errWrongNumberOfArguments)
-
-  result = copyNode(n)
-  for i in countup(1, f - 1):
-    var arg = if i < a: n.sons[i] else: copyTree(s.typ.n.sons[i].sym.ast)
-    if arg == nil or arg.kind == nkEmpty:
-      LocalError(n.info, errWrongNumberOfArguments)
-    addSon(result, arg)
-
-var evalTemplateCounter* = 0
-  # to prevent endless recursion in templates instantation
-
-proc evalTemplate*(n: PNode, sym: PSym): PNode = 
-  inc(evalTemplateCounter)
-  if evalTemplateCounter > 100:
-    GlobalError(n.info, errTemplateInstantiationTooNested)
-    result = n
-
-  # replace each param by the corresponding node:
-  var args = evalTemplateArgs(n, sym)
-  result = evalTemplateAux(sym.getBody, args, sym)
-  
-  dec(evalTemplateCounter)
  
 proc evalTypeTrait*(n: PNode, context: PSym): PNode =
   ## XXX: This should be pretty much guaranteed to be true
@@ -963,7 +914,11 @@ proc evalExpandToAst(c: PEvalContext, original: PNode): PNode =
 
   case expandedSym.kind
   of skTemplate:
-    result = evalTemplate(macroCall, expandedSym)
+    let genSymOwner = if c.tos != nil and c.tos.prc != nil: 
+        c.tos.prc 
+      else:
+        c.module
+    result = evalTemplate(macroCall, expandedSym, genSymOwner)
   of skMacro:
     # At this point macroCall.sons[0] is nkSym node.
     # To be completely compatible with normal macro invocation,
@@ -1196,6 +1151,9 @@ proc evalMagicOrCall(c: PEvalContext, n: PNode): PNode =
     result = evalAux(c, n.sons[1], {efLValue})
     if isSpecial(result): return 
     result = copyTree(result)
+  of mNBindSym:
+    # trivial implementation:
+    result = n.sons[1]
   of mStrToIdent: 
     result = evalAux(c, n.sons[1], {})
     if isSpecial(result): return 
@@ -1284,7 +1242,7 @@ proc evalMagicOrCall(c: PEvalContext, n: PNode): PNode =
         cc = result
     if isEmpty(a) or isEmpty(b) or isEmpty(cc): result = emptyNode
     else: result = evalOp(m, n, a, b, cc)
-  
+    
 proc evalAux(c: PEvalContext, n: PNode, flags: TEvalFlags): PNode = 
   result = emptyNode
   dec(gNestedEvals)
@@ -1356,7 +1314,7 @@ proc evalAux(c: PEvalContext, n: PNode, flags: TEvalFlags): PNode =
   of nkPragmaBlock:
     result = evalAux(c, n.sons[1], flags)
   of nkIdentDefs, nkCast, nkYieldStmt, nkAsmStmt, nkForStmt, nkPragmaExpr, 
-     nkLambdaKinds, nkContinueStmt, nkIdent, nkParForStmt: 
+     nkLambdaKinds, nkContinueStmt, nkIdent, nkParForStmt, nkBindStmt:
     result = raiseCannotEval(c, n.info)
   of nkRefTy:
     result = evalAux(c, n.sons[0], flags)
@@ -1366,7 +1324,8 @@ proc evalAux(c: PEvalContext, n: PNode, flags: TEvalFlags): PNode =
   inc(gNestedEvals)
 
 proc tryEval(c: PEvalContext, n: PNode): PNode =
-  var n = transform(c.module, n)
+  #internalAssert nfTransf in n.flags
+  var n = transformExpr(c.module, n)
   gWhileCounter = evalMaxIterations
   gNestedEvals = evalMaxRecDepth
   result = evalAux(c, n, {})
@@ -1402,7 +1361,7 @@ proc evalMacroCall*(c: PEvalContext, n: PNode, sym: PSym): PNode =
   if evalTemplateCounter > 100: 
     GlobalError(n.info, errTemplateInstantiationTooNested)
 
-  inc genSymBaseId
+  #inc genSymBaseId
   var s = newStackFrame()
   s.call = n
   setlen(s.params, 2)

@@ -22,25 +22,31 @@ proc considerAcc*(n: PNode): PIdent =
     of 0: GlobalError(n.info, errIdentifierExpected, renderTree(n))
     of 1: result = considerAcc(n.sons[0])
     else:
-      if n.len == 2 and n[0].kind == nkIdent and n[0].ident.id == ord(wStar):
-        # XXX find a better way instead of `*x` for 'genSym'
-        result = genSym(n[1].ident.s)
-      else:
-        var id = ""
-        for i in 0.. <n.len:
-          let x = n.sons[i]
-          case x.kind
-          of nkIdent: id.add(x.ident.s)
-          of nkSym: id.add(x.sym.name.s)
-          else: GlobalError(n.info, errIdentifierExpected, renderTree(n))
-        result = getIdent(id)
+      var id = ""
+      for i in 0.. <n.len:
+        let x = n.sons[i]
+        case x.kind
+        of nkIdent: id.add(x.ident.s)
+        of nkSym: id.add(x.sym.name.s)
+        else: GlobalError(n.info, errIdentifierExpected, renderTree(n))
+      result = getIdent(id)
   else:
     GlobalError(n.info, errIdentifierExpected, renderTree(n))
  
-proc errorSym*(n: PNode): PSym =
+proc errorSym*(c: PContext, n: PNode): PSym =
   ## creates an error symbol to avoid cascading errors (for IDE support)
-  result = newSym(skUnknown, considerAcc(n), getCurrOwner())
-  result.info = n.info
+  var m = n
+  # ensure that 'considerAcc' can't fail:
+  if m.kind == nkDotExpr: m = m.sons[1]
+  let ident = if m.kind in {nkIdent, nkSym, nkAccQuoted}: 
+      considerAcc(m)
+    else:
+      getIdent("err:" & renderTree(m))
+  result = newSym(skError, ident, getCurrOwner(), n.info)
+  result.typ = errorType(c)
+  incl(result.flags, sfDiscardable)
+  # pretend it's imported from some unknown module to prevent cascading errors:
+  SymTabAddAt(c.tab, result, ast.ImportTablePos)
 
 type 
   TOverloadIterMode* = enum 
@@ -99,7 +105,6 @@ proc AddInterfaceDeclAux(c: PContext, sym: PSym) =
     # add to interface:
     if c.module != nil: StrTableAdd(c.module.tab, sym)
     else: InternalError(sym.info, "AddInterfaceDeclAux")
-  #if getCurrOwner().kind == skModule: incl(sym.flags, sfGlobal)
 
 proc addInterfaceDeclAt*(c: PContext, sym: PSym, at: Natural) = 
   addDeclAt(c, sym, at)
@@ -132,7 +137,7 @@ proc lookUp*(c: PContext, n: PNode): PSym =
     result = SymtabGet(c.Tab, n.ident)
     if result == nil: 
       LocalError(n.info, errUndeclaredIdentifier, n.ident.s)
-      result = errorSym(n)
+      result = errorSym(c, n)
   of nkSym:
     result = n.sym
   of nkAccQuoted:
@@ -140,7 +145,7 @@ proc lookUp*(c: PContext, n: PNode): PSym =
     result = SymtabGet(c.Tab, ident)
     if result == nil:
       LocalError(n.info, errUndeclaredIdentifier, ident.s)
-      result = errorSym(n)
+      result = errorSym(c, n)
   else:
     InternalError(n.info, "lookUp")
     return
@@ -159,11 +164,11 @@ proc QualifiedLookUp*(c: PContext, n: PNode, flags = {checkUndeclared}): PSym =
     result = SymtabGet(c.Tab, ident)
     if result == nil and checkUndeclared in flags: 
       LocalError(n.info, errUndeclaredIdentifier, ident.s)
-      result = errorSym(n)
+      result = errorSym(c, n)
     elif checkAmbiguity in flags and result != nil and 
         Contains(c.AmbiguousSymbols, result.id): 
       LocalError(n.info, errUseQualifier, ident.s)
-  of nkSym: 
+  of nkSym:
     result = n.sym
     if checkAmbiguity in flags and Contains(c.AmbiguousSymbols, result.id): 
       LocalError(n.info, errUseQualifier, n.sym.name.s)
@@ -183,11 +188,11 @@ proc QualifiedLookUp*(c: PContext, n: PNode, flags = {checkUndeclared}): PSym =
           result = StrTableGet(m.tab, ident)
         if result == nil and checkUndeclared in flags: 
           LocalError(n.sons[1].info, errUndeclaredIdentifier, ident.s)
-          result = errorSym(n.sons[1])
+          result = errorSym(c, n.sons[1])
       elif checkUndeclared in flags:
         LocalError(n.sons[1].info, errIdentifierExpected, 
                    renderTree(n.sons[1]))
-        result = errorSym(n.sons[1])
+        result = errorSym(c, n.sons[1])
   else:
     result = nil
   if result != nil and result.kind == skStub: loadStub(result)
@@ -224,8 +229,8 @@ proc InitOverloadIter*(o: var TOverloadIter, c: PContext, n: PNode): PSym =
       else: 
         LocalError(n.sons[1].info, errIdentifierExpected, 
                    renderTree(n.sons[1]))
-        result = errorSym(n.sons[1])
-  of nkSymChoice: 
+        result = errorSym(c, n.sons[1])
+  of nkClosedSymChoice, nkOpenSymChoice:
     o.mode = oimSymChoice
     result = n.sons[0].sym
     o.stackPtr = 1
@@ -264,7 +269,7 @@ proc nextOverloadIter*(o: var TOverloadIter, c: PContext, n: PNode): PSym =
       result = n.sons[o.stackPtr].sym
       Incl(o.inSymChoice, result.id)
       inc(o.stackPtr)
-    else:
+    elif n.kind == nkOpenSymChoice:
       # try 'local' symbols too for Koenig's lookup:
       o.mode = oimSymChoiceLocalLookup
       o.stackPtr = c.tab.tos-1

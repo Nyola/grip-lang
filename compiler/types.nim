@@ -117,7 +117,7 @@ proc isCompatibleToCString(a: PType): bool =
       result = true
   
 proc getProcHeader(sym: PSym): string = 
-  result = sym.name.s & '('
+  result = sym.owner.name.s & '.' & sym.name.s & '('
   var n = sym.typ.n
   for i in countup(1, sonsLen(n) - 1): 
     var p = n.sons[i]
@@ -330,7 +330,8 @@ proc canFormAcycleAux(marker: var TIntSet, typ: PType, startId: int): bool =
   var t = skipTypes(typ, abstractInst)
   if tfAcyclic in t.flags: return 
   case t.kind
-  of tyTuple, tyObject, tyRef, tySequence, tyArray, tyArrayConstr, tyOpenArray:
+  of tyTuple, tyObject, tyRef, tySequence, tyArray, tyArrayConstr, tyOpenArray,
+     tyVarargs:
     if not ContainsOrIncl(marker, t.id): 
       for i in countup(0, sonsLen(t) - 1): 
         result = canFormAcycleAux(marker, t.sons[i], startId)
@@ -379,6 +380,13 @@ proc mutateType(t: PType, iter: TTypeMutator, closure: PObject): PType =
   var marker = InitIntSet()
   result = mutateTypeAux(marker, t, iter, closure)
 
+proc ValueToString(a: PNode): string = 
+  case a.kind
+  of nkCharLit..nkUInt64Lit: result = $(a.intVal)
+  of nkFloatLit..nkFloat128Lit: result = $(a.floatVal)
+  of nkStrLit..nkTripleStrLit: result = a.strVal
+  else: result = "<invalid value>"
+
 proc rangeToStr(n: PNode): string = 
   assert(n.kind == nkRange)
   result = ValueToString(n.sons[0]) & ".." & ValueToString(n.sons[1])
@@ -402,7 +410,7 @@ proc TypeToString(typ: PType, prefer: TPreferedDesc = preferName): string =
       "float", "float32", "float64", "float128",
       "uint", "uint8", "uint16", "uint32", "uint64",
       "bignum", "const ",
-      "!", "varargs[$1]", "iter[$1]", "proxy[$1]", "TypeClass" ]
+      "!", "varargs[$1]", "iter[$1]", "Error Type", "TypeClass" ]
   var t = typ
   result = ""
   if t == nil: return 
@@ -485,7 +493,7 @@ proc TypeToString(typ: PType, prefer: TPreferedDesc = preferName): string =
       addSep(prag)
       add(prag, "thread")
     if len(prag) != 0: add(result, "{." & prag & ".}")
-  of tyVarargs, tyIter, tyProxy:
+  of tyVarargs, tyIter:
     result = typeToStr[t.kind] % typeToString(t.sons[0])
   else: 
     result = typeToStr[t.kind]
@@ -499,7 +507,7 @@ proc base(t: PType): PType =
 
 proc firstOrd(t: PType): biggestInt = 
   case t.kind
-  of tyBool, tyChar, tySequence, tyOpenArray, tyString: result = 0
+  of tyBool, tyChar, tySequence, tyOpenArray, tyString, tyVarargs: result = 0
   of tySet, tyVar: result = firstOrd(t.sons[0])
   of tyArray, tyArrayConstr: result = firstOrd(t.sons[0])
   of tyRange: 
@@ -929,16 +937,20 @@ proc typeAllowedAux(marker: var TIntSet, typ: PType, kind: TSymKind): bool =
     result = typeAllowedAux(marker, t.sons[0], skVar)
   of tyPtr:
     result = typeAllowedAux(marker, t.sons[0], skVar)
-  of tyArrayConstr, tyTuple, tySet, tyConst, tyMutable, tyIter, tyProxy: 
-    for i in countup(0, sonsLen(t) - 1): 
+  of tyArrayConstr, tyTuple, tySet, tyConst, tyMutable, tyIter:
+    for i in countup(0, sonsLen(t) - 1):
       result = typeAllowedAux(marker, t.sons[i], kind)
-      if not result: break 
+      if not result: break
   of tyObject:
     if kind == skConst: return false
     for i in countup(0, sonsLen(t) - 1): 
       result = typeAllowedAux(marker, t.sons[i], kind)
       if not result: break
     if result and t.n != nil: result = typeAllowedNode(marker, t.n, kind)
+  of tyProxy:
+    # for now same as error node; we say it's a valid type as it should
+    # prevent cascading errors:
+    result = true
     
 proc typeAllowed(t: PType, kind: TSymKind): bool = 
   var marker = InitIntSet()
@@ -1076,10 +1088,10 @@ proc computeSizeAux(typ: PType, a: var biggestInt): biggestInt =
     if result < 0: return 
     if a < maxAlign: a = maxAlign
     result = align(result, a)
-  of tyGenericInst, tyDistinct, tyGenericBody, tyMutable, tyConst, tyIter,
-     tyProxy: 
+  of tyGenericInst, tyDistinct, tyGenericBody, tyMutable, tyConst, tyIter:
     result = computeSizeAux(lastSon(typ), a)
-  else: 
+  of tyProxy: result = 1
+  else:
     #internalError("computeSizeAux()")
     result = - 1
   typ.size = result
@@ -1104,3 +1116,17 @@ proc containsGenericTypeIter(t: PType, closure: PObject): bool =
 
 proc containsGenericType*(t: PType): bool = 
   result = iterOverType(t, containsGenericTypeIter, nil)
+
+proc baseOfDistinct*(t: PType): PType =
+  if t.kind == tyDistinct:
+    result = t.sons[0]
+  else:
+    result = copyType(t, t.owner, false)
+    var parent: PType = nil
+    var it = result
+    while it.kind in {tyPtr, tyRef}:
+      parent = it
+      it = it.sons[0]
+    if it.kind == tyDistinct:
+      internalAssert parent != nil
+      parent.sons[0] = it.sons[0]

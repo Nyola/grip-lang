@@ -62,7 +62,8 @@ type
     wFieldChecks, 
     wWatchPoint, wSubsChar, 
     wAcyclic, wShallow, wUnroll, wLinearScanEnd,
-    wWrite, wPutEnv, wPrependEnv, wAppendEnv, wThreadVar, wEmit, wNoStackFrame,
+    wWrite, wGensym, wInject, wDirty, wInheritable, wThreadVar, wEmit, 
+    wNoStackFrame,
     wImplicitStatic, wGlobal, wHoist
 
     wAuto, wBool, wCatch, wChar, wClass,
@@ -142,7 +143,7 @@ const
     "passc", "passl", "borrow", "discardable", "fieldchecks",
     "watchpoint",
     "subschar", "acyclic", "shallow", "unroll", "linearscanend",
-    "write", "putenv", "prependenv", "appendenv", "threadvar", "emit",
+    "write", "gensym", "inject", "dirty", "inheritable", "threadvar", "emit",
     "nostackframe", "implicitstatic", "global", "hoist",
     
     "auto", "bool", "catch", "char", "class",

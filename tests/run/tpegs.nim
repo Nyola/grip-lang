@@ -161,7 +161,7 @@ template multipleOp(k: TPegKind, localOpt: expr) =
   if result.len == 1:
     result = result.sons[0]
 
-proc `/`*(a: openArray[TPeg]): TPeg {.
+proc `/`*(a: varargs[TPeg]): TPeg {.
   rtl, extern: "npegsOrderedChoice".} =
   ## constructs an ordered choice with the PEGs in `a`
   multipleOp(pkOrderedChoice, addChoice)
@@ -178,7 +178,7 @@ proc addSequence(dest: var TPeg, elem: TPeg) =
     else: add(dest, elem)
   else: add(dest, elem)
 
-proc sequence*(a: openArray[TPeg]): TPeg {.
+proc sequence*(a: varargs[TPeg]): TPeg {.
   rtl, extern: "npegs$1".} =
   ## constructs a sequence with all the PEGs from `a`
   multipleOp(pkSequence, addSequence)
@@ -866,7 +866,7 @@ template `=~`*(s: string, pattern: TPeg): expr =
   ##     echo("syntax error")
   ##  
   when not definedInScope(matches):
-    var matches: array[0..maxSubpatterns-1, string]
+    var matches {.inject.}: array[0..maxSubpatterns-1, string]
   match(s, pattern, matches)
 
 # ------------------------- more string handling ------------------------------
@@ -935,7 +935,7 @@ proc replace*(s: string, sub: TPeg, by = ""): string {.
       inc(i, x)
   add(result, substr(s, i))
   
-proc parallelReplace*(s: string, subs: openArray[
+proc parallelReplace*(s: string, subs: varargs[
                       tuple[pattern: TPeg, repl: string]]): string {.
                       rtl, extern: "npegs$1".} = 
   ## Returns a modified copy of `s` with the substitutions in `subs`
@@ -957,7 +957,7 @@ proc parallelReplace*(s: string, subs: openArray[
   add(result, substr(s, i))  
   
 proc transformFile*(infile, outfile: string,
-                    subs: openArray[tuple[pattern: TPeg, repl: string]]) {.
+                    subs: varargs[tuple[pattern: TPeg, repl: string]]) {.
                     rtl, extern: "npegs$1".} =
   ## reads in the file `infile`, performs a parallel replacement (calls
   ## `parallelReplace`) and writes back to `outfile`. Calls ``quit`` if an
@@ -1052,7 +1052,7 @@ type
     charset: set[char]       ## if kind == tkCharSet
     index: int               ## if kind == tkBackref
   
-  TPegLexer = object          ## the lexer object.
+  TPegLexer {.inheritable.} = object          ## the lexer object.
     bufpos: int               ## the current position within the buffer
     buf: cstring              ## the buffer itself
     LineNumber: int           ## the current line number

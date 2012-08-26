@@ -25,7 +25,6 @@ import
 const 
   genPrefix* = ":tmp"         # prefix for generated names
 
-proc transfPass*(): TPass
 # implementation
 
 type 
@@ -97,8 +96,7 @@ proc getCurrOwner(c: PTransf): PSym =
   else: result = c.module
   
 proc newTemp(c: PTransf, typ: PType, info: TLineInfo): PSym = 
-  result = newSym(skTemp, getIdent(genPrefix), getCurrOwner(c))
-  result.info = info
+  result = newSym(skTemp, getIdent(genPrefix), getCurrOwner(c), info)
   result.typ = skipTypes(typ, {tyGenericInst})
   incl(result.flags, sfFromGeneric)
 
@@ -108,54 +106,6 @@ proc transformSons(c: PTransf, n: PNode): PTransNode =
   result = newTransNode(n)
   for i in countup(0, sonsLen(n)-1): 
     result[i] = transform(c, n.sons[i])
-
-# Transforming iterators into non-inlined versions is pretty hard, but
-# unavoidable for not bloating the code too much. If we had direct access to
-# the program counter, things'd be much easier.
-# ::
-#
-#  iterator items(a: string): char =
-#    var i = 0
-#    while i < length(a):
-#      yield a[i]
-#      inc(i)
-#
-#  for ch in items("hello world"): # `ch` is an iteration variable
-#    echo(ch)
-#
-# Should be transformed into::
-#
-#  type
-#    TItemsClosure = record
-#      i: int
-#      state: int
-#  proc items(a: string, c: var TItemsClosure): char =
-#    case c.state
-#    of 0: goto L0 # very difficult without goto!
-#    of 1: goto L1 # can be implemented by GCC's computed gotos
-#
-#    block L0:
-#      c.i = 0
-#      while c.i < length(a):
-#        c.state = 1
-#        return a[i]
-#        block L1: inc(c.i)
-#
-# More efficient, but not implementable::
-#
-#  type
-#    TItemsClosure = record
-#      i: int
-#      pc: pointer
-#
-#  proc items(a: string, c: var TItemsClosure): char =
-#    goto c.pc
-#    c.i = 0
-#    while c.i < length(a):
-#      c.pc = label1
-#      return a[i]
-#      label1: inc(c.i)
-#
 
 proc newAsgnStmt(c: PTransf, le: PNode, ri: PTransNode): PTransNode = 
   result = newTransNode(nkFastAsgn, PNode(ri).info, 2)
@@ -178,15 +128,6 @@ proc transformSymAux(c: PTransf, n: PNode): PNode =
     if result != nil: return
     tc = tc.next
   result = b
-  when false:
-    case b.sym.kind
-    of skConst, skEnumField: 
-      if sfFakeConst notin b.sym.flags:
-        if skipTypes(b.sym.typ, abstractInst).kind notin ConstantDataTypes: 
-          result = getConstExpr(c.module, b)
-          if result == nil: InternalError(b.info, "transformSym: const")
-    else: 
-      nil
 
 proc transformSym(c: PTransf, n: PNode): PTransNode = 
   result = PTransNode(transformSymAux(c, n))
@@ -263,9 +204,8 @@ proc hasContinue(n: PNode): bool =
       if hasContinue(n.sons[i]): return true
 
 proc newLabel(c: PTransf, n: PNode): PSym =
-  result = newSym(skLabel, nil, getCurrOwner(c))
+  result = newSym(skLabel, nil, getCurrOwner(c), n.info)
   result.name = getIdent(genPrefix & $result.id)
-  result.info = n.info
 
 proc transformBlock(c: PTransf, n: PNode): PTransNode =
   var labl: PSym
@@ -378,20 +318,6 @@ proc transformAddrDeref(c: PTransf, n: PNode, a, b: TNodeKind): PTransNode =
     if n.sons[0].kind == a or n.sons[0].kind == b:
       # addr ( deref ( x )) --> x
       result = PTransNode(n.sons[0].sons[0])
-
-proc generateThunk(c: PTransf, prc: PNode, dest: PType): PNode =
-  ## Converts 'prc' into '(thunk, nil)' so that it's compatible with
-  ## a closure.
-  
-  # we cannot generate a proper thunk here for GC-safety reasons (see internal
-  # documentation):
-  if gCmd == cmdCompileToEcmaScript: return prc
-  result = newNodeIT(nkClosure, prc.info, dest)
-  var conv = newNodeIT(nkHiddenStdConv, prc.info, dest)
-  conv.add(emptyNode)
-  conv.add(prc)
-  result.add(conv)
-  result.add(newNodeIT(nkNilLit, prc.info, getSysType(tyNil)))
   
 proc transformConv(c: PTransf, n: PNode): PTransNode = 
   # numeric types need range checks:
@@ -427,7 +353,7 @@ proc transformConv(c: PTransf, n: PNode): PTransNode =
       result[2] = copyTree(dest.n.sons[1]).PTransNode
     else:
       result = transformSons(c, n)
-  of tyOpenArray: 
+  of tyOpenArray, tyVarargs:
     result = transform(c, n.sons[1])
   of tyCString: 
     if source.kind == tyString: 
@@ -466,12 +392,6 @@ proc transformConv(c: PTransf, n: PNode): PTransNode =
       result[0] = transform(c, n.sons[1])
     else: 
       result = transform(c, n.sons[1])
-  of tyProc:
-    if dest.callConv == ccClosure and source.callConv == ccDefault:
-      let x = transform(c, n.sons[1]).pnode
-      result = generateThunk(c, x, dest).ptransnode
-    else:
-      result = transformSons(c, n)    
   of tyGenericParam, tyOrdinal, tyTypeClass:
     result = transform(c, n.sons[1])
     # happens sometimes for generated assignments, etc.
@@ -485,7 +405,7 @@ type
 proc putArgInto(arg: PNode, formal: PType): TPutArgInto = 
   # This analyses how to treat the mapping "formal <-> arg" in an
   # inline context.
-  if skipTypes(formal, abstractInst).kind == tyOpenArray: 
+  if skipTypes(formal, abstractInst).kind in {tyOpenArray, tyVarargs}:
     return paDirectMapping    # XXX really correct?
                               # what if ``arg`` has side-effects?
   case arg.kind
@@ -636,11 +556,14 @@ proc transformCall(c: PTransf, n: PNode): PTransNode =
           inc(j)
       add(result, a.ptransnode)
     if len(result) == 2: result = result[1]
-  elif n.sons[0].kind == nkSym and n.sons[0].sym.kind == skMethod: 
-    # use the dispatcher for the call:
-    result = methodCall(transformSons(c, n).pnode).ptransNode
   else:
-    result = transformSons(c, n)
+    let s = transformSons(c, n).pnode
+    # bugfix: check after 'transformSons' if it's still a method call:
+    # use the dispatcher for the call:
+    if s.sons[0].kind == nkSym and s.sons[0].sym.kind == skMethod:
+      result = methodCall(s).ptransNode
+    else:
+      result = s.ptransNode
 
 proc dontInlineConstant(orig, cnst: PNode): bool {.inline.} =
   # symbols that expand to a complex constant (array, etc.) should not be
@@ -657,21 +580,23 @@ proc transform(c: PTransf, n: PNode): PTransNode =
     result = PTransNode(n)
   of nkBracketExpr: result = transformArrayAccess(c, n)
   of procDefs:
-    if n.sons[genericParamsPos].kind == nkEmpty:
-      var s = n.sons[namePos].sym
-      n.sons[bodyPos] = PNode(transform(c, s.getBody))
-      if s.ast.sons[bodyPos] != n.sons[bodyPos]:
-        # somehow this can happen ... :-/
-        s.ast.sons[bodyPos] = n.sons[bodyPos]
-      n.sons[bodyPos] = liftLambdas(n)
-      if n.kind == nkMethodDef: methodDef(s, false)
+    when false:
+      if n.sons[genericParamsPos].kind == nkEmpty:
+        var s = n.sons[namePos].sym
+        n.sons[bodyPos] = PNode(transform(c, s.getBody))
+        if s.ast.sons[bodyPos] != n.sons[bodyPos]:
+          # somehow this can happen ... :-/
+          s.ast.sons[bodyPos] = n.sons[bodyPos]
+        #n.sons[bodyPos] = liftLambdas(s, n)
+        #if n.kind == nkMethodDef: methodDef(s, false)
     result = PTransNode(n)
   of nkMacroDef:
     # XXX no proper closure support yet:
-    if n.sons[genericParamsPos].kind == nkEmpty:
-      var s = n.sons[namePos].sym
-      n.sons[bodyPos] = PNode(transform(c, s.getBody))
-      if n.kind == nkMethodDef: methodDef(s, false)
+    when false:
+      if n.sons[genericParamsPos].kind == nkEmpty:
+        var s = n.sons[namePos].sym
+        n.sons[bodyPos] = PNode(transform(c, s.getBody))
+        if n.kind == nkMethodDef: methodDef(s, false)
     result = PTransNode(n)
   of nkForStmt: 
     inc c.inLoop
@@ -735,38 +660,56 @@ proc transform(c: PTransf, n: PNode): PTransNode =
   if cnst != nil and not dontInlineConstant(n, cnst):
     result = PTransNode(cnst) # do not miss an optimization
 
-proc processTransf(context: PPassContext, n: PNode): PNode = 
+proc processTransf(c: PTransf, n: PNode): PNode = 
   # Note: For interactive mode we cannot call 'passes.skipCodegen' and skip
   # this step! We have to rely that the semantic pass transforms too errornous
   # nodes into an empty node.
-  if passes.skipCodegen(n) or context.fromCache or nfTransf in n.flags: return n
-  var c = PTransf(context)
+  if passes.skipCodegen(n) or c.fromCache or nfTransf in n.flags: return n
   pushTransCon(c, newTransCon(getCurrOwner(c)))
   result = PNode(transform(c, n))
   popTransCon(c)
   incl(result.flags, nfTransf)
 
-proc openTransf(module: PSym, filename: string): PPassContext = 
-  var n: PTransf
-  new(n)
-  n.contSyms = @[]
-  n.breakSyms = @[]
-  n.module = module
-  result = n
+proc openTransf(module: PSym, filename: string): PTransf = 
+  new(result)
+  result.contSyms = @[]
+  result.breakSyms = @[]
+  result.module = module
 
-proc openTransfCached(module: PSym, filename: string, 
-                      rd: PRodReader): PPassContext = 
-  result = openTransf(module, filename)
-  for m in items(rd.methods): methodDef(m, true)
+when false:
+  proc openTransfCached(module: PSym, filename: string, 
+                        rd: PRodReader): PPassContext = 
+    result = openTransf(module, filename)
+    for m in items(rd.methods): methodDef(m, true)
 
-proc transfPass(): TPass = 
-  initPass(result)
-  result.open = openTransf
-  result.openCached = openTransfCached
-  result.process = processTransf
-  result.close = processTransf # we need to process generics too!
+  proc transfPass(): TPass = 
+    initPass(result)
+    result.open = openTransf
+    result.openCached = openTransfCached
+    result.process = processTransf
+    result.close = processTransf # we need to process generics too!
   
-proc transform*(module: PSym, n: PNode): PNode =
+proc transformBody*(module: PSym, n: PNode, prc: PSym): PNode =
+  if nfTransf in n.flags or prc.kind in {skTemplate, skMacro}:
+    result = n
+  else:
+    var c = openTransf(module, "")
+    result = processTransf(c, n)
+    if prc.kind != skMacro:
+      # XXX no closures yet for macros:
+      result = liftLambdas(prc, result)
+    incl(result.flags, nfTransf)
+
+proc transformStmt*(module: PSym, n: PNode): PNode =
+  if nfTransf in n.flags:
+    result = n
+  else:
+    var c = openTransf(module, "")
+    result = processTransf(c, n)
+    result = liftLambdasForTopLevel(module, result)
+    incl(result.flags, nfTransf)
+
+proc transformExpr*(module: PSym, n: PNode): PNode =
   if nfTransf in n.flags:
     result = n
   else:

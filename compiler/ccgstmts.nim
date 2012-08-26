@@ -48,7 +48,7 @@ proc loadInto(p: BProc, le, ri: PNode, a: var TLoc) {.inline.} =
     expr(p, ri, a)
 
 proc startBlock(p: BProc, start: TFormatStr = "{$n",
-                args: openarray[PRope]): int {.discardable.} =
+                args: varargs[PRope]): int {.discardable.} =
   lineCg(p, cpsStmts, start, args)
   inc(p.labels)
   result = len(p.blocks)
@@ -91,6 +91,24 @@ template preserveBreakIdx(body: stmt): stmt =
   var oldBreakIdx = p.breakIdx
   body
   p.breakIdx = oldBreakIdx
+
+proc genState(p: BProc, n: PNode) =
+  internalAssert n.len == 1 and n.sons[0].kind == nkIntLit
+  let idx = n.sons[0].intVal
+  lineCg(p, cpsStmts, "STATE$1: ;$n", [idx.toRope])
+
+proc genGotoState(p: BProc, n: PNode) =
+  # we resist the temptation to translate it into duff's device as it later
+  # will be translated into computed gotos anyway for GCC at least:
+  # switch (x.state) {
+  #   case 0: goto STATE0;
+  # ...
+  var a: TLoc
+  initLocExpr(p, n.sons[0], a)
+  lineF(p, cpsStmts, "switch ($1) {$n", [rdLoc(a)])
+  for i in 0 .. lastOrd(n.sons[0].typ):
+    lineF(p, cpsStmts, "case $1: goto STATE$1;$n", [toRope(i)])
+  lineF(p, cpsStmts, "}$n", [])
 
 proc genSingleVar(p: BProc, a: PNode) =
   var v = a.sons[0].sym
@@ -863,5 +881,7 @@ proc genStmts(p: BProc, t: PNode) =
         if prc.getBody.kind != nkEmpty or lfDynamicLib in prc.loc.flags: 
           genProc(p.module, prc)
   of nkParForStmt: genParForStmt(p, t)
+  of nkState: genState(p, t)
+  of nkGotoState: genGotoState(p, t)
   else: internalError(t.info, "genStmts(" & $t.kind & ')')
   

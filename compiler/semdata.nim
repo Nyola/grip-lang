@@ -31,6 +31,8 @@ type
     resultSym*: PSym          # the result symbol (if we are in a proc)
     nestedLoopCounter*: int   # whether we are in a loop or not
     nestedBlockCounter*: int  # whether we are in a block or not
+    InTryStmt*: int           # whether we are in a try statement; works also
+                              # in standalone ``except`` and ``finally``
     next*: PProcCon           # used for stacking procedure contexts
   
   TInstantiatedSymbol* {.final.} = object
@@ -71,10 +73,14 @@ type
     semConstExpr*: proc (c: PContext, n: PNode): PNode {.nimcall.} # for the pragmas
     semExpr*: proc (c: PContext, n: PNode): PNode {.nimcall.}      # for the pragmas
     semConstBoolExpr*: proc (c: PContext, n: PNode): PNode {.nimcall.} # XXX bite the bullet
+    semOverloadedCall*: proc (c: PContext, n, nOrig: PNode,
+                              filter: TSymKinds): PNode {.nimcall.}
     includedFiles*: TIntSet    # used to detect recursive include files
     filename*: string          # the module's filename
     userPragmas*: TStrTable
     evalContext*: PEvalContext
+    UnknownIdents*: TIntSet    # ids of all unknown identifiers to prevent
+                               # naming it multiple times
 
 var
   gGenericsCache: PGenericsCache # save for modularity
@@ -83,36 +89,6 @@ proc newGenericsCache*(): PGenericsCache =
   new(result)
   initIdTable(result.InstTypes)
   result.generics = @[]
-
-proc tempContext*(c: PContext): PContext =
-  ## generates a temporary context so that side-effects can be rolled-back;
-  ## necessary for ``system.compiles``.
-  new(result)
-  result.module = c.module
-  result.p = c.p
-  # don't use the old cache:
-  result.generics = newGenericsCache()
-  result.friendModule = c.friendModule
-  result.InstCounter = c.InstCounter
-  result.threadEntries = @[]
-  # hrm, 'tab' is expensive to copy ... so we don't. We open a new scope
-  # instead to be able to undo scope changes. Not entirely correct for
-  # explicit 'global' vars though:
-  #shallowCopy(result.tab, c.tab)
-  assign(result.AmbiguousSymbols, c.AmbiguousSymbols)
-  result.InGenericContext = c.InGenericContext
-  result.InUnrolledContext = c.InUnrolledContext
-  result.InCompilesContext = c.InCompilesContext
-  result.converters = c.converters
-  result.semConstExpr = c.semConstExpr
-  result.semExpr = c.semExpr
-  result.semConstBoolExpr = c.semConstBoolExpr
-  assign(result.includedFiles, c.includedFiles) 
-  result.filename = c.filename
-  #shallowCopy(result.userPragmas, c.userPragmas) 
-  # XXX mark it as read-only:
-  result.evalContext = c.evalContext
-  
 
 proc newContext*(module: PSym, nimfile: string): PContext
 
@@ -195,6 +171,7 @@ proc newContext(module: PSym, nimfile: string): PContext =
     # we have to give up and use a per-module cache for generic instantiations:
     result.generics = newGenericsCache()
     assert gGenericsCache == nil
+  result.UnknownIdents = initIntSet()
 
 proc addConverter(c: PContext, conv: PSym) = 
   var L = len(c.converters)
@@ -229,7 +206,11 @@ proc newTypeS(kind: TTypeKind, c: PContext): PType =
 
 proc errorType*(c: PContext): PType =
   ## creates a type representing an error state
-  result = newTypeS(tyEmpty, c)
+  result = newTypeS(tyError, c)
+
+proc errorNode*(c: PContext, n: PNode): PNode =
+  result = newNodeI(nkEmpty, n.info)
+  result.typ = errorType(c)
 
 proc fillTypeS(dest: PType, kind: TTypeKind, c: PContext) = 
   dest.kind = kind
@@ -244,21 +225,11 @@ proc makeRangeType*(c: PContext, first, last: biggestInt,
   result = newTypeS(tyRange, c)
   result.n = n
   rawAddSon(result, getSysType(tyInt)) # basetype of range
-  
-proc markUsed*(n: PNode, s: PSym) = 
-  incl(s.flags, sfUsed)
-  if {sfDeprecated, sfError} * s.flags != {}:
-    if sfDeprecated in s.flags: Message(n.info, warnDeprecated, s.name.s)
-    if sfError in s.flags: LocalError(n.info, errWrongSymbolX, s.name.s)
 
-proc markIndirect*(c: PContext, s: PSym) =
+proc markIndirect*(c: PContext, s: PSym) {.inline.} =
   if s.kind in {skProc, skConverter, skMethod, skIterator}:
     incl(s.flags, sfAddrTaken)
     # XXX add to 'c' for global analysis
-
-proc useSym*(sym: PSym): PNode =
-  result = newSymNode(sym)
-  markUsed(result, sym)
 
 proc illFormedAst*(n: PNode) = 
   GlobalError(n.info, errIllFormedAstX, renderTree(n, {renderNoComments}))

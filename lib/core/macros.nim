@@ -27,7 +27,10 @@ type
     nnkBracket, nnkBracketExpr, nnkPragmaExpr, nnkRange, 
     nnkDotExpr, nnkCheckedFieldExpr, nnkDerefExpr, nnkIfExpr, 
     nnkElifExpr, nnkElseExpr, nnkLambda, nnkDo, nnkAccQuoted, 
-    nnkTableConstr, nnkBind, nnkSymChoice, nnkHiddenStdConv, 
+    nnkTableConstr, nnkBind,
+    nnkClosedSymChoice,
+    nnkOpenSymChoice,
+    nnkHiddenStdConv,
     nnkHiddenSubConv, nnkHiddenCallConv, nnkConv, nnkCast, nnkStaticExpr,
     nnkAddr, nnkHiddenAddr, nnkHiddenDeref, nnkObjDownConv, 
     nnkObjUpConv, nnkChckRangeF, nnkChckRange64, nnkChckRange, 
@@ -91,7 +94,7 @@ type
 const
   nnkLiterals* = {nnkCharLit..nnkNilLit}
   nnkCallKinds* = {nnkCall, nnkInfix, nnkPrefix, nnkPostfix, nnkCommand,
-                      nnkCallStrLit}
+                   nnkCallStrLit}
 
 # Nodes should be reference counted to make the `copy` operation very fast!
 # However, this is difficult to achieve: modify(n[0][1]) should propagate to
@@ -122,7 +125,7 @@ proc len*(n: PNimrodNode): int {.magic: "NLen".}
 proc add*(father, child: PNimrodNode) {.magic: "NAdd".}
   ## adds the `child` to the `father` node
 
-proc add*(father: PNimrodNode, children: openArray[PNimrodNode]) {.
+proc add*(father: PNimrodNode, children: varargs[PNimrodNode]) {.
   magic: "NAddMultiple".}
   ## adds each child of `children` to the `father` node
 
@@ -186,8 +189,29 @@ proc newIdentNode*(i: string): PNimrodNode {.compileTime.} =
   result = newNimNode(nnkIdent)
   result.ident = !i
 
+type
+  TBindSymRule* = enum   ## specifies how ``bindSym`` behaves
+    brClosed,            ## only the symbols in current scope are bound
+    brOpen,              ## open wrt overloaded symbols, but may be a single
+                         ## symbol if not ambiguous (the rules match that of
+                         ## binding in generics)
+    brForceOpen          ## same as brOpen, but it will always be open even
+                         ## if not ambiguous (this cannot be achieved with
+                         ## any other means in the language currently)
+
+proc bindSym*(ident: string, rule: TBindSymRule = brClosed): PNimrodNode {.
+              magic: "NBindSym".}
+  ## creates a node that binds `ident` to a symbol node. The bound symbol
+  ## may be an overloaded symbol.
+  ## If ``rule == brClosed`` either an ``nkClosedSymChoice`` tree is
+  ## returned or ``nkSym`` if the symbol is not ambiguous.
+  ## If ``rule == brOpen`` either an ``nkOpenSymChoice`` tree is
+  ## returned or ``nkSym`` if the symbol is not ambiguous.
+  ## If ``rule == brForceOpen`` always an ``nkOpenSymChoice`` tree is
+  ## returned even if the symbol is not ambiguous.
+
 proc toStrLit*(n: PNimrodNode): PNimrodNode {.compileTime.} =
-  ## converts the AST `n` to the concrete Nimrod code and wraps that 
+  ## converts the AST `n` to the concrete Nimrod code and wraps that
   ## in a string literal node
   return newStrLitNode(repr(n))
 
@@ -250,8 +274,16 @@ proc expectLen*(n: PNimrodNode, len: int) {.compileTime.} =
   ## macros that check its number of arguments. 
   if n.len != len: error("macro expects a node with " & $len & " children")
 
+proc newCall*(theProc: PNimrodNode,
+              args: varargs[PNimrodNode]): PNimrodNode {.compileTime.} =
+  ## produces a new call node. `theProc` is the proc that is called with
+  ## the arguments ``args[0..]``.
+  result = newNimNode(nnkCall)
+  result.add(theProc)
+  result.add(args)
+
 proc newCall*(theProc: TNimrodIdent,
-              args: openArray[PNimrodNode]): PNimrodNode {.compileTime.} =
+              args: varargs[PNimrodNode]): PNimrodNode {.compileTime.} =
   ## produces a new call node. `theProc` is the proc that is called with
   ## the arguments ``args[0..]``.
   result = newNimNode(nnkCall)
@@ -259,7 +291,7 @@ proc newCall*(theProc: TNimrodIdent,
   result.add(args)
   
 proc newCall*(theProc: string,
-              args: openArray[PNimrodNode]): PNimrodNode {.compileTime.} =
+              args: varargs[PNimrodNode]): PNimrodNode {.compileTime.} =
   ## produces a new call node. `theProc` is the proc that is called with
   ## the arguments ``args[0..]``.
   result = newNimNode(nnkCall)

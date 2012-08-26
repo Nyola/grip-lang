@@ -11,7 +11,9 @@ Nimrod Tutorial (Part II)
 Introduction
 ============
 
-  "With great power comes great responsibility." -- Spiderman
+  "Object-oriented programming is an exceptionally bad idea which could
+  only have originated in California." --Edsger Dijkstra
+
 
 This document is a tutorial for the advanced constructs of the *Nimrod*
 programming language.
@@ -20,11 +22,10 @@ programming language.
 Pragmas
 =======
 Pragmas are Nimrod's method to give the compiler additional information/
-commands without introducing a massive number of new keywords. Pragmas are
-processed during semantic checking. Pragmas are enclosed in the
-special ``{.`` and ``.}`` curly dot brackets. This tutorial does not cover
-pragmas. See the `manual <manual.html>`_ or `user guide <nimrodc.html>`_ for
-a description of the available pragmas.
+commands without introducing a massive number of new keywords. Pragmas are 
+enclosed in the special ``{.`` and ``.}`` curly dot brackets. This tutorial 
+does not cover pragmas. See the `manual <manual.html>`_ 
+or `user guide <nimrodc.html>`_ for a description of the available pragmas.
 
 
 Object Oriented Programming
@@ -73,7 +74,11 @@ section.
 
 Inheritance is done with the ``object of`` syntax. Multiple inheritance is
 currently not supported. If an object type has no suitable ancestor, ``TObject``
-can be used as its ancestor, but this is only a convention.
+can be used as its ancestor, but this is only a convention. Objects that have 
+no ancestor are implicitely ``final``. You can use the ``inheritable`` pragma 
+to introduce new object roots apart from ``system.TObject``. (This is used
+in the GTK wrapper for instance.)
+
 
 **Note**: Composition (*has-a* relation) is often preferable to inheritance
 (*is-a* relation) for simple code reuse. Since objects are value types in

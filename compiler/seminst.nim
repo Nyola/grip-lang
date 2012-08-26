@@ -21,14 +21,13 @@ proc instantiateGenericParamList(c: PContext, n: PNode, pt: TIdTable,
       InternalError(a.info, "instantiateGenericParamList; no symbol")
     var q = a.sym
     if q.typ.kind notin {tyTypeDesc, tyGenericParam, tyTypeClass, tyExpr}: continue
-    var s = newSym(skType, q.name, getCurrOwner())
-    s.info = q.info
+    var s = newSym(skType, q.name, getCurrOwner(), q.info)
     s.flags = s.flags + {sfUsed, sfFromGeneric}
     var t = PType(IdTableGet(pt, q.typ))
     if t == nil:
       LocalError(a.info, errCannotInstantiateX, s.name.s)
-      break
-    if t.kind == tyGenericParam: 
+      t = errorType(c)
+    elif t.kind == tyGenericParam: 
       InternalError(a.info, "instantiateGenericParamList: " & q.name.s)
     elif t.kind == tyGenericInvokation:
       #t = instGenericContainer(c, a, t)
@@ -79,8 +78,7 @@ proc instantiateBody(c: PContext, n: PNode, result: PSym) =
       addResult(c, result.typ.sons[0], n.info, result.kind)
       addResultNode(c, n)
     var b = semStmtScope(c, n.sons[bodyPos])
-    # XXX Bad hack for tests/titer2 and tests/tactiontable
-    n.sons[bodyPos] = transform(c.module, b)
+    n.sons[bodyPos] = transformBody(c.module, b, result)
     #echo "code instantiated ", result.name.s
     excl(result.flags, sfForward)
     popProcCon(c)

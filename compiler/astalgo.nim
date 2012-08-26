@@ -166,7 +166,9 @@ proc SameValue*(a, b: PNode): bool =
   of nkStrLit..nkTripleStrLit: 
     if b.kind in {nkStrLit..nkTripleStrLit}: result = a.strVal == b.strVal
   else:
-    InternalError(a.info, "SameValue")
+    # don't raise an internal error for 'nimrod check':
+    #InternalError(a.info, "SameValue")
+    nil
 
 proc leValue*(a, b: PNode): bool = 
   # a <= b?
@@ -178,7 +180,10 @@ proc leValue*(a, b: PNode): bool =
     if b.kind in {nkFloatLit..nkFloat64Lit}: result = a.floatVal <= b.floatVal
   of nkStrLit..nkTripleStrLit: 
     if b.kind in {nkStrLit..nkTripleStrLit}: result = a.strVal <= b.strVal
-  else: InternalError(a.info, "leValue")
+  else: 
+    # don't raise an internal error for 'nimrod check':
+    #InternalError(a.info, "leValue")
+    nil
 
 proc lookupInRecord(n: PNode, field: PIdent): PSym = 
   result = nil
@@ -435,7 +440,9 @@ proc debugTree(n: PNode, indent: int, maxRecDepth: int): PRope =
         appf(result, ",$N$1\"strVal\": $2", [istr, makeYamlString(n.strVal)])
       of nkSym: 
         appf(result, ",$N$1\"sym\": $2_$3", 
-             [istr, toRope(n.sym.name.s), toRope(n.sym.id)])
+            [istr, toRope(n.sym.name.s), toRope(n.sym.id)])
+        #     [istr, symToYaml(n.sym, indent, maxRecDepth), 
+        #     toRope(n.sym.id)])
       of nkIdent: 
         if n.ident != nil: 
           appf(result, ",$N$1\"ident\": $2", [istr, makeYamlString(n.ident.s)])
@@ -449,6 +456,7 @@ proc debugTree(n: PNode, indent: int, maxRecDepth: int): PRope =
             appf(result, "$N$1$2", [spaces(indent + 4), debugTree(n.sons[i], 
                 indent + 4, maxRecDepth - 1)])
           appf(result, "$N$1]", [istr])
+    appf(result, ",$N$1\"info\": $2", [istr, lineInfoToStr(n.info)])
     appf(result, "$N$1}", [spaces(indent)])
 
 proc debug(n: PSym) = 

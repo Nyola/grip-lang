@@ -150,7 +150,7 @@ Define               Effect
 ``release``          Turns off runtime checks and turns on the optimizer.
 ``useWinAnsi``       Modules like ``os`` and ``osproc`` use the Ansi versions
                      of the Windows API. The default build uses the Unicode
-                     version.s
+                     version.
 ``useFork``          Makes ``osproc`` use ``fork`` instead of ``posix_spawn``.
 ``useNimRtl``        Compile and link against ``nimrtl.dll``.
 ``useMalloc``        Makes Nimrod use C's `malloc`:idx: instead of Nimrod's 
@@ -410,7 +410,7 @@ Nimrod for embedded systems
 ===========================
 
 The standard library can be avoided to a point where C code generation 
-for a 16bit micro controllers is feasible. Use the `standalone`:idx: target
+for 16bit micro controllers is feasible. Use the `standalone`:idx: target
 (``--os:standalone``) for a bare bones standard library that lacks any
 OS features.
 
@@ -487,7 +487,7 @@ objects as `shallow`:idx:\:
 .. code-block:: Nimrod
   var s = "abc"
   shallow(s) # mark 's' as shallow string
-  var x = s  # now might does not copy the string!
+  var x = s  # now might not copy the string!
   
 Usage of ``shallow`` is always safe once you know the string won't be modified
 anymore, similar to Ruby's `freeze`:idx:.
@@ -513,4 +513,41 @@ efficient:
     else: quit(errorStr(p, "expected: console or gui"))
   of "license": c.license = UnixToNativePath(k.value)
   else: quit(errorStr(p, "unknown variable: " & k.key))
+
+
+The ECMAScript target
+=====================
+
+Nimrod can also generate `ECMAScript`:idx: (also known as `JavaScript`:idx:)
+code. However, the ECMAScript code generator is experimental!
+
+Nimrod targets ECMAScript 1.5 which is supported by any widely used browser.
+Since ECMAScript does not have a portable means to include another module,
+Nimrod just generates a long ``.js`` file.
+
+Features or modules that the ECMAScript platform does not support are not
+available. This includes:
+
+* manual memory management (``alloc``, etc.)
+* casting and other unsafe operations (``cast`` operator, ``zeroMem``, etc.)
+* file management
+* most modules of the Standard library
+* proper 64 bit integer arithmetic
+* unsigned integer arithmetic
+
+However, the modules `strutils`:idx:, `math`:idx:, and `times`:idx: are
+available! To access the DOM, use the `dom`:idx: module that is only
+available for the ECMAScript platform.
+
+To compile a Nimrod module into a ``.js`` file use the ``js`` command; the
+default is a  ``.js`` file that is supposed to be referenced in an ``.html``
+file. However, you can also run the code with `nodejs`:idx:\:  
+
+  nimrod js -d:nodejs -r examples/hallo.nim
+
+
+Known bugs
+----------
+
+* exception handling does not work
 

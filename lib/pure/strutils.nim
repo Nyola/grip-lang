@@ -655,6 +655,20 @@ proc find*(s: string, chars: set[char], start: int = 0): int {.noSideEffect,
     if s[i] in chars: return i
   return -1
 
+proc rfind*(s, sub: string, start: int = -1): int {.noSideEffect.} =
+  ## Searches for `sub` in `s` in reverse, starting at `start` and going
+  ## backwards to 0. Searching is case-sensitive. If `sub` is not in `s`, -1 is
+  ## returned.
+  let realStart = if start == -1: s.len else: start
+  for i in countdown(realStart-sub.len, 0):
+    for j in 0..sub.len-1:
+      result = i
+      if sub[j] != s[i+j]:
+        result = -1
+        break
+    if result != -1: return
+  return -1
+
 proc quoteIfContainsWhite*(s: string): string =
   ## returns ``'"' & s & '"'`` if `s` contains a space and does not
   ## start with a quote, else returns `s`
@@ -1015,7 +1029,7 @@ proc findNormalized(x: string, inArray: openarray[string]): int =
 proc invalidFormatString() {.noinline.} =
   raise newException(EInvalidValue, "invalid format string")  
 
-proc addf*(s: var string, formatstr: string, a: openarray[string]) {.
+proc addf*(s: var string, formatstr: string, a: varargs[string, `$`]) {.
   noSideEffect, rtl, extern: "nsuAddf".} =
   ## The same as ``add(s, formatstr % a)``, but more efficient.
   const PatternChars = {'a'..'z', 'A'..'Z', '0'..'9', '\128'..'\255', '_'}
@@ -1112,6 +1126,13 @@ proc `%` *(formatstr, a: string): string {.noSideEffect,
   ## This is the same as ``formatstr % [a]``.
   result = newStringOfCap(formatstr.len + a.len)
   addf(result, formatstr, [a])
+
+proc format*(formatstr: string, a: varargs[string, `$`]): string {.noSideEffect,
+  rtl, extern: "nsuFormatVarargs".} =
+  ## This is the same as ``formatstr % a`` except that it supports
+  ## auto stringification.
+  result = newStringOfCap(formatstr.len + a.len)
+  addf(result, formatstr, a)
 
 {.pop.}
 

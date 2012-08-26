@@ -14,7 +14,8 @@ import
   wordrecg, ropes, msgs, os, condsyms, idents, renderer, types, platform, math,
   magicsys, parser, nversion, nimsets, semfold, importer,
   procfind, lookups, rodread, pragmas, passes, semdata, semtypinst, sigmatch,
-  suggest, semthreads, intsets, transf, evals, idgen, aliases
+  semthreads, intsets, transf, evals, idgen, aliases, cgmeth, lambdalifting,
+  evaltempl
 
 proc semPass*(): TPass
 # implementation
@@ -37,9 +38,10 @@ proc addResultNode(c: PContext, n: PNode)
 proc instGenericContainer(c: PContext, n: PNode, header: PType): PType
 
 proc typeMismatch(n: PNode, formal, actual: PType) = 
-  LocalError(n.Info, errGenerated, msgKindToString(errTypeMismatch) &
-      typeToString(actual) & ") " &
-      `%`(msgKindToString(errButExpectedX), [typeToString(formal)]))
+  if formal.kind != tyError and actual.kind != tyError: 
+    LocalError(n.Info, errGenerated, msgKindToString(errTypeMismatch) &
+        typeToString(actual) & ") " &
+        `%`(msgKindToString(errButExpectedX), [typeToString(formal)]))
 
 proc fitNode(c: PContext, formal: PType, arg: PNode): PNode = 
   result = IndexTypesMatch(c, formal, arg.typ, arg)
@@ -53,9 +55,17 @@ proc isTopLevel(c: PContext): bool {.inline.} =
   result = c.tab.tos <= 2
 
 proc newSymS(kind: TSymKind, n: PNode, c: PContext): PSym = 
-  result = newSym(kind, considerAcc(n), getCurrOwner())
-  result.info = n.info
-  
+  result = newSym(kind, considerAcc(n), getCurrOwner(), n.info)
+
+proc newSymG*(kind: TSymKind, n: PNode, c: PContext): PSym =
+  # like newSymS, but considers gensym'ed symbols
+  if n.kind == nkSym: 
+    result = n.sym
+    InternalAssert sfGenSym in result.flags
+    InternalAssert result.kind == kind
+  else:
+    result = newSym(kind, considerAcc(n), getCurrOwner(), n.info)
+
 proc semIdentVis(c: PContext, kind: TSymKind, n: PNode,
                  allowed: TSymFlags): PSym
   # identifier with visability
@@ -165,6 +175,7 @@ proc myOpen(module: PSym, filename: string): PPassContext =
   c.semConstExpr = semConstExpr
   c.semExpr = semExprNoFlags
   c.semConstBoolExpr = semConstBoolExpr
+  c.semOverloadedCall = semOverloadedCall
   pushProcCon(c, module)
   pushOwner(c.module)
   openScope(c.tab)            # scope for imported symbols
@@ -181,6 +192,7 @@ proc myOpen(module: PSym, filename: string): PPassContext =
 proc myOpenCached(module: PSym, filename: string, 
                   rd: PRodReader): PPassContext = 
   result = myOpen(module, filename)
+  for m in items(rd.methods): methodDef(m, true)
 
 proc SemStmtAndGenerateGenerics(c: PContext, n: PNode): PNode = 
   result = semStmt(c, n)
@@ -192,6 +204,7 @@ proc SemStmtAndGenerateGenerics(c: PContext, n: PNode): PNode =
       # a generic has been added to `a`:
       if result.kind != nkEmpty: addSon(a, result)
       result = a
+  result = transformStmt(c.module, result)
 
 proc RecoverContext(c: PContext) = 
   # clean up in case of a semantic error: We clean up the stacks, etc. This is

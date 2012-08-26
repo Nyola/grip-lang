@@ -9,15 +9,14 @@
 
 ## This file implements features required for IDE support.
 
-import 
-  lexer, idents, ast, astalgo, semdata, msgs, types, sigmatch, options, 
-  renderer
+# imported from sigmatch.nim
 
 const
   sep = '\t'
   sectionSuggest = "sug"
   sectionDef = "def"
   sectionContext = "con"
+  sectionUsage = "use"
 
 proc SymToStr(s: PSym, isLocal: bool, section: string, li: TLineInfo): string = 
   result = section
@@ -33,7 +32,7 @@ proc SymToStr(s: PSym, isLocal: bool, section: string, li: TLineInfo): string =
   if s.typ != nil: 
     result.add(typeToString(s.typ))
   result.add(sep)
-  result.add(toFilename(li))
+  result.add(toFullPath(li))
   result.add(sep)
   result.add($ToLinenumber(li))
   result.add(sep)
@@ -42,42 +41,51 @@ proc SymToStr(s: PSym, isLocal: bool, section: string, li: TLineInfo): string =
 proc SymToStr(s: PSym, isLocal: bool, section: string): string = 
   result = SymToStr(s, isLocal, section, s.info)
 
-proc filterSym(s: PSym): bool {.inline.} = 
-  result = s.name.s[0] in lexer.SymChars
+proc filterSym(s: PSym): bool {.inline.} =
+  result = s.name.s[0] in lexer.SymChars and s.kind != skModule
 
-proc suggestField(s: PSym, outputs: var int) = 
-  if filterSym(s):
+proc fieldVisible*(c: PContext, f: PSym): bool {.inline.} =
+  let fmoduleId = getModule(f).id
+  result = sfExported in f.flags or fmoduleId == c.module.id or
+      fmoduleId == c.friendModule.id
+
+proc suggestField(c: PContext, s: PSym, outputs: var int) = 
+  if filterSym(s) and fieldVisible(c, s):
     OutWriteln(SymToStr(s, isLocal=true, sectionSuggest))
     inc outputs
 
-template wholeSymTab(cond, section: expr) {.immediate.} = 
-  for i in countdown(c.tab.tos-1, 0): 
-    for it in items(c.tab.stack[i]): 
+when not defined(nimhygiene):
+  {.pragma: inject.}
+
+template wholeSymTab(cond, section: expr) {.immediate.} =
+  for i in countdown(c.tab.tos-1, 0):
+    for item in items(c.tab.stack[i]):
+      let it {.inject.} = item
       if cond:
         OutWriteln(SymToStr(it, isLocal = i > ModuleTablePos, section))
         inc outputs
 
-proc suggestSymList(list: PNode, outputs: var int) = 
+proc suggestSymList(c: PContext, list: PNode, outputs: var int) = 
   for i in countup(0, sonsLen(list) - 1): 
     if list.sons[i].kind == nkSym:
-      suggestField(list.sons[i].sym, outputs)
+      suggestField(c, list.sons[i].sym, outputs)
     #else: InternalError(list.info, "getSymFromList")
 
-proc suggestObject(n: PNode, outputs: var int) = 
+proc suggestObject(c: PContext, n: PNode, outputs: var int) = 
   case n.kind
   of nkRecList: 
-    for i in countup(0, sonsLen(n)-1): suggestObject(n.sons[i], outputs)
+    for i in countup(0, sonsLen(n)-1): suggestObject(c, n.sons[i], outputs)
   of nkRecCase: 
     var L = sonsLen(n)
     if L > 0:
-      suggestObject(n.sons[0], outputs)
-      for i in countup(1, L-1): suggestObject(lastSon(n.sons[i]), outputs)
-  of nkSym: suggestField(n.sym, outputs)
+      suggestObject(c, n.sons[0], outputs)
+      for i in countup(1, L-1): suggestObject(c, lastSon(n.sons[i]), outputs)
+  of nkSym: suggestField(c, n.sym, outputs)
   else: nil
 
 proc nameFits(c: PContext, s: PSym, n: PNode): bool = 
   var op = n.sons[0]
-  if op.kind == nkSymChoice: op = op.sons[0]
+  if op.kind in {nkOpenSymChoice, nkClosedSymChoice}: op = op.sons[0]
   var opr: PIdent
   case op.kind
   of nkSym: opr = op.sym.name
@@ -140,7 +148,7 @@ proc suggestFieldAccess(c: PContext, n: PNode, outputs: var int) =
     # look up if the identifier belongs to the enum:
     var t = typ
     while t != nil: 
-      suggestSymList(t.n, outputs)
+      suggestSymList(c, t.n, outputs)
       t = t.sons[0]
     suggestOperations(c, n, typ, outputs)
   else:
@@ -148,12 +156,12 @@ proc suggestFieldAccess(c: PContext, n: PNode, outputs: var int) =
     if typ.kind == tyObject: 
       var t = typ
       while true: 
-        suggestObject(t.n, outputs)
+        suggestObject(c, t.n, outputs)
         if t.sons[0] == nil: break 
         t = skipTypes(t.sons[0], {tyGenericInst})
       suggestOperations(c, n, typ, outputs)
     elif typ.kind == tyTuple and typ.n != nil: 
-      suggestSymList(typ.n, outputs)
+      suggestSymList(c, typ.n, outputs)
       suggestOperations(c, n, typ, outputs)
     else:
       suggestOperations(c, n, typ, outputs)
@@ -178,6 +186,16 @@ proc findClosestCall(n: PNode): PNode =
       result = findClosestCall(n.sons[i])
       if result != nil: return
 
+proc isTracked(current: TLineInfo, tokenLen: int): bool =
+  # the column of an identifier is at its *end*, so we subtract to get the
+  # start of it.
+  for i in countup(0, high(checkPoints)):
+    if current.fileIndex == checkPoints[i].fileIndex:
+      if current.line == checkPoints[i].line:
+        let col = checkPoints[i].col
+        if col >= current.col-tokenLen and col <= current.col:
+          return true
+
 proc findClosestSym(n: PNode): PNode = 
   if n.kind == nkSym and msgs.inCheckpoint(n.info) == cpExact: 
     result = n
@@ -200,7 +218,40 @@ proc fuzzySemCheck(c: PContext, n: PNode): PNode =
       for i in 0 .. < sonsLen(n): result.addSon(fuzzySemCheck(c, n.sons[i]))
 
 var
-  usageSym: PSym
+  usageSym*: PSym
+  lastLineInfo: TLineInfo
+
+proc findUsages(node: PNode, s: PSym) =
+  if usageSym == nil and isTracked(node.info, s.name.s.len):
+    usageSym = s
+    OutWriteln(SymToStr(s, isLocal=false, sectionUsage))
+  elif s == usageSym:
+    if lastLineInfo != node.info:
+      OutWriteln(SymToStr(s, isLocal=false, sectionUsage, node.info))
+    lastLineInfo = node.info
+
+proc findDefinition(node: PNode, s: PSym) =
+  if isTracked(node.info, s.name.s.len):
+    OutWriteln(SymToStr(s, isLocal=false, sectionDef))
+    quit(0)
+
+proc suggestSym*(n: PNode, s: PSym) {.inline.} =
+  ## misnamed: should be 'symDeclared'
+  if optUsages in gGlobalOptions:
+    findUsages(n, s)
+  if optDef in gGlobalOptions:
+    findDefinition(n, s)
+
+proc markUsed(n: PNode, s: PSym) =
+  incl(s.flags, sfUsed)
+  if {sfDeprecated, sfError} * s.flags != {}:
+    if sfDeprecated in s.flags: Message(n.info, warnDeprecated, s.name.s)
+    if sfError in s.flags: LocalError(n.info, errWrongSymbolX, s.name.s)
+  suggestSym(n, s)
+
+proc useSym*(sym: PSym): PNode =
+  result = newSymNode(sym)
+  markUsed(result, sym)
 
 proc suggestExpr*(c: PContext, node: PNode) = 
   var cp = msgs.inCheckpoint(node.info)
@@ -214,11 +265,11 @@ proc suggestExpr*(c: PContext, node: PNode) =
     var n = findClosestDot(node)
     if n == nil: n = node
     else: cp = cpExact
-    
     if n.kind == nkDotExpr and cp == cpExact:
       var obj = safeSemExpr(c, n.sons[0])
       suggestFieldAccess(c, obj, outputs)
     else:
+      #debug n
       suggestEverything(c, n, outputs)
   
   if optContext in gGlobalOptions:
@@ -238,25 +289,6 @@ proc suggestExpr*(c: PContext, node: PNode) =
         addSon(a, x)
       suggestCall(c, a, n, outputs)
   
-  if optDef in gGlobalOptions:
-    let n = findClosestSym(fuzzySemCheck(c, node))
-    if n != nil:
-      OutWriteln(SymToStr(n.sym, isLocal=false, sectionDef))
-      inc outputs
-      
-  if optUsages in gGlobalOptions:
-    if usageSym == nil:
-      let n = findClosestSym(fuzzySemCheck(c, node))
-      if n != nil: 
-        usageSym = n.sym
-        OutWriteln(SymToStr(n.sym, isLocal=false, sectionDef))
-        inc outputs
-    else:
-      let n = node
-      if n.kind == nkSym and n.sym == usageSym:
-        OutWriteln(SymToStr(n.sym, isLocal=false, sectionDef, n.info))
-        inc outputs
-    
   dec(c.InCompilesContext)
   if outputs > 0 and optUsages notin gGlobalOptions: quit(0)
 

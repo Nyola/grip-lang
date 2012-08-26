@@ -13,14 +13,23 @@
 # A problem is that it cannot be detected if the symbol is introduced
 # as in ``var x = ...`` or used because macros/templates can hide this!
 # So we have to eval templates/macros right here so that symbol
-# lookup can be accurate.
+# lookup can be accurate. XXX But this can only be done for immediate macros!
 
 # included from sem.nim
 
-type 
-  TSemGenericFlag = enum 
+type
+  TSemGenericFlag = enum
     withinBind, withinTypeDesc
   TSemGenericFlags = set[TSemGenericFlag]
+
+proc getIdentNode(n: PNode): PNode =
+  case n.kind
+  of nkPostfix: result = getIdentNode(n.sons[1])
+  of nkPragmaExpr: result = getIdentNode(n.sons[0])
+  of nkIdent, nkAccQuoted, nkSym: result = n
+  else:
+    illFormedAst(n)
+    result = n
 
 proc semGenericStmt(c: PContext, n: PNode, flags: TSemGenericFlags,
                     toBind: var TIntSet): PNode
@@ -38,8 +47,8 @@ proc semGenericStmtSymbol(c: PContext, n: PNode, s: PSym): PNode =
     # Introduced in this pass! Leave it as an identifier.
     result = n
   of skProc, skMethod, skIterator, skConverter: 
-    result = symChoice(c, n, s)
-  of skTemplate: 
+    result = symChoice(c, n, s, scOpen)
+  of skTemplate:
     result = semTemplateExpr(c, n, s, false)
   of skMacro: 
     result = semMacroExpr(c, n, s, false)
@@ -54,15 +63,6 @@ proc semGenericStmtSymbol(c: PContext, n: PNode, s: PSym): PNode =
       result = n
   else: result = newSymNode(s, n.info)
   
-proc getIdentNode(n: PNode): PNode = 
-  case n.kind
-  of nkPostfix: result = getIdentNode(n.sons[1])
-  of nkPragmaExpr: result = getIdentNode(n.sons[0])
-  of nkIdent, nkAccQuoted: result = n
-  else: 
-    illFormedAst(n)
-    result = n
-
 proc semGenericStmt(c: PContext, n: PNode, 
                     flags: TSemGenericFlags, toBind: var TIntSet): PNode = 
   result = n
@@ -75,7 +75,8 @@ proc semGenericStmt(c: PContext, n: PNode,
       if withinBind in flags:
         localError(n.info, errUndeclaredIdentifier, n.ident.s)
     else:
-      if withinBind in flags or s.id in toBind: result = symChoice(c, n, s)
+      if withinBind in flags or s.id in toBind:
+        result = symChoice(c, n, s, scClosed)
       else: result = semGenericStmtSymbol(c, n, s)
   of nkDotExpr:
     var s = QualifiedLookUp(c, n, {})
@@ -104,7 +105,7 @@ proc semGenericStmt(c: PContext, n: PNode,
       of skUnknown, skParam: 
         # Leave it as an identifier.
       of skProc, skMethod, skIterator, skConverter: 
-        result.sons[0] = symChoice(c, n.sons[0], s)
+        result.sons[0] = symChoice(c, n.sons[0], s, scOpen)
         first = 1
       of skGenericParam: 
         result.sons[0] = newSymNode(s, n.sons[0].info)
@@ -114,7 +115,7 @@ proc semGenericStmt(c: PContext, n: PNode,
         if (s.typ != nil) and (s.typ.kind != tyGenericParam): 
           result.sons[0] = newSymNode(s, n.sons[0].info)
           first = 1
-      else: 
+      else:
         result.sons[0] = newSymNode(s, n.sons[0].info)
         first = 1
     for i in countup(first, sonsLen(result) - 1): 
@@ -255,7 +256,7 @@ proc semGenericStmt(c: PContext, n: PNode,
                                               flags, toBind)
     if n.sons[paramsPos].kind != nkEmpty: 
       if n.sons[paramsPos].sons[0].kind != nkEmpty: 
-        addPrelimDecl(c, newSym(skUnknown, getIdent("result"), nil))
+        addPrelimDecl(c, newSym(skUnknown, getIdent("result"), nil, n.info))
       n.sons[paramsPos] = semGenericStmt(c, n.sons[paramsPos], flags, toBind)
     n.sons[pragmasPos] = semGenericStmt(c, n.sons[pragmasPos], flags, toBind)
     var body: PNode

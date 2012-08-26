@@ -28,7 +28,8 @@ type
     errRecursiveDependencyX, errOnOrOffExpected, errNoneSpeedOrSizeExpected, 
     errInvalidPragma, errUnknownPragma, errInvalidDirectiveX, 
     errAtPopWithoutPush, errEmptyAsm, errInvalidIndentation, 
-    errExceptionExpected, errExceptionAlreadyHandled, errYieldNotAllowedHere, 
+    errExceptionExpected, errExceptionAlreadyHandled, 
+    errYieldNotAllowedHere, errYieldNotAllowedInTryStmt, 
     errInvalidNumberOfYieldExpr, errCannotReturnExpr, errAttemptToRedefine, 
     errStmtInvalidAfterReturn, errStmtExpected, errInvalidLabel, 
     errInvalidCmdLineOption, errCmdLineArgExpected, errCmdLineNoArgExpected, 
@@ -157,7 +158,8 @@ const
     errInvalidIndentation: "invalid indentation", 
     errExceptionExpected: "exception expected", 
     errExceptionAlreadyHandled: "exception already handled", 
-    errYieldNotAllowedHere: "\'yield\' only allowed in a loop of an iterator", 
+    errYieldNotAllowedHere: "'yield' only allowed in an iterator",
+    errYieldNotAllowedInTryStmt: "'yield' cannot be used within 'try' in a non-inlined iterator",
     errInvalidNumberOfYieldExpr: "invalid number of \'yield\' expresions", 
     errCannotReturnExpr: "current routine cannot return an expression", 
     errAttemptToRedefine: "redefinition of \'$1\'", 
@@ -352,7 +354,7 @@ const
     warnLanguageXNotSupported: "language \'$1\' not supported [LanguageXNotSupported]", 
     warnCommentXIgnored: "comment \'$1\' ignored [CommentXIgnored]", 
     warnXisPassedToProcVar: "\'$1\' is passed to a procvar; deprecated [XisPassedToProcVar]", 
-    warnAnalysisLoophole: "thread analysis incomplete due to unkown call '$1' [AnalysisLoophole]",
+    warnAnalysisLoophole: "thread analysis incomplete due to unknown call '$1' [AnalysisLoophole]",
     warnDifferentHeaps: "possible inconsistency of thread local heaps [DifferentHeaps]",
     warnWriteToForeignHeap: "write to foreign heap [WriteToForeignHeap]",
     warnImplicitClosure: "implicit closure convention: '$1' [ImplicitClosure]",
@@ -540,7 +542,7 @@ proc `??`* (info: TLineInfo, filename: string): bool =
   # only for debugging purposes
   result = filename in info.toFilename
 
-var checkPoints: seq[TLineInfo] = @[]
+var checkPoints*: seq[TLineInfo] = @[]
 
 proc addCheckpoint*(info: TLineInfo) = 
   checkPoints.add(info)
@@ -555,6 +557,7 @@ proc OutWriteln*(s: string) =
 proc MsgWriteln*(s: string) = 
   ## Writes to stdout. If --stdout option is given, writes to stderr instead.
   if gSilence == 0:
+    if gCmd == cmdIdeTools and optCDebug notin gGlobalOptions: return
     if optStdout in gGlobalOptions: Writeln(stderr, s)
     else: Writeln(stdout, s)
 
@@ -601,7 +604,7 @@ proc handleError(msg: TMsgKind, eh: TErrorHandling, s: string) =
     elif eh == doRaise:
       raiseRecoverableError(s)
   
-proc `==`(a, b: TLineInfo): bool = 
+proc `==`*(a, b: TLineInfo): bool = 
   result = a.line == b.line and a.fileIndex == b.fileIndex
 
 proc writeContext(lastinfo: TLineInfo) = 
@@ -651,7 +654,7 @@ proc liMessage(info: TLineInfo, msg: TMsgKind, arg: string,
     frmt = posErrorFormat
     # we try to filter error messages so that not two error message
     # in the same file and line are produced:
-    ignoreMsg = lastError == info and eh != doAbort
+    #ignoreMsg = lastError == info and eh != doAbort
     lastError = info
   of warnMin..warnMax:
     ignoreMsg = optWarns notin gOptions or msg notin gNotes
@@ -675,7 +678,6 @@ proc GlobalError*(info: TLineInfo, msg: TMsgKind, arg = "") =
   liMessage(info, msg, arg, doRaise)
 
 proc LocalError*(info: TLineInfo, msg: TMsgKind, arg = "") =
-  if gCmd == cmdIdeTools and gErrorCounter > 10: return
   liMessage(info, msg, arg, doNothing)
 
 proc Message*(info: TLineInfo, msg: TMsgKind, arg = "") =

@@ -136,6 +136,16 @@ aligned to the preceding one, it does not start a new comment:
   i = i + 1 # This a new comment that is NOT
   echo(i)   # continued here, because this comment refers to the echo statement
 
+
+The alignment requirement does not hold if the preceding comment piece ends in
+a backslash (followed by optional whitespace): 
+
+.. code-block:: nimrod
+  type
+    TMyObject {.final, pure, acyclic.} = object  # comment continues: \
+      # we have lots of space here to comment 'TMyObject'.
+      # This line belongs to the comment as it's properly aligned.
+
 Comments are tokens; they are only allowed at certain places in the input file
 as they belong to the syntax tree! This feature enables perfect source-to-source
 transformations (such as pretty-printing) and superior documentation generators.
@@ -891,23 +901,43 @@ Arrays are always bounds checked (at compile-time or at runtime). These
 checks can be disabled via pragmas or invoking the compiler with the
 ``--boundChecks:off`` command line switch.
 
-An open array is  also a means to implement passing a variable number of
-arguments to a procedure. The compiler converts the list of arguments
-to an array automatically:
+The current implementation does not support nested open arrays.
+
+
+Varargs
+~~~~~~~
+
+A `varargs`:idx: parameter is an openarray parameter that additionally
+allows to pass a variable number of arguments to a procedure. The compiler 
+converts the list of arguments to an array implicitely:
 
 .. code-block:: nimrod
-  proc myWriteln(f: TFile, a: openarray[string]) =
+  proc myWriteln(f: TFile, a: varargs[string]) =
     for s in items(a):
       write(f, s)
     write(f, "\n")
 
   myWriteln(stdout, "abc", "def", "xyz")
-  # is transformed by the compiler to:
+  # is transformed to:
   myWriteln(stdout, ["abc", "def", "xyz"])
 
-This transformation is only done if the openarray parameter is the
-last parameter in the procedure header. The current implementation does not
-support nested open arrays.
+This transformation is only done if the varargs parameter is the
+last parameter in the procedure header. It is also possible to perform
+type conversions in this context:
+
+.. code-block:: nimrod
+  proc myWriteln(f: TFile, a: varargs[string, `$`]) =
+    for s in items(a):
+      write(f, s)
+    write(f, "\n")
+
+  myWriteln(stdout, 123, "abc", 4.0)
+  # is transformed to:
+  myWriteln(stdout, [$123, $"def", $4.0])
+
+In this example ``$`` is applied to any argument that is passed to the 
+parameter ``a``. (Note that ``$`` applied to strings is a nop.)
+
 
 
 Tuples and object types
@@ -940,9 +970,10 @@ in future versions of the compiler.
   person = ("Peter", 30)
 
 The implementation aligns the fields for best access performance. The alignment
-is compatible with the way the C compiler does it. For consistency 
-with ``object`` declarations, tuples in a ``type`` section can also be defined
-with indentation instead of ``[]``:
+is compatible with the way the C compiler does it. 
+
+For consistency  with ``object`` declarations, tuples in a ``type`` section
+can also be defined with indentation instead of ``[]``:
 
 .. code-block:: nimrod
 
@@ -958,7 +989,7 @@ the ``of`` operator can be used to determine the object's type.
 .. code-block:: nimrod
 
   type
-    TPerson = object
+    TPerson {.inheritable.} = object
       name*: string   # the * means that `name` is accessible from other modules
       age: int        # no * means that the field is hidden
 
@@ -972,7 +1003,9 @@ the ``of`` operator can be used to determine the object's type.
 
 Object fields that should be visible from outside the defining module, have to
 be marked by ``*``. In contrast to tuples, different object types are
-never *equivalent*.
+never *equivalent*. Objects that have no ancestor are implicitely ``final``
+and thus have no hidden type field. One can use the ``inheritable`` pragma to
+introduce new object roots apart from ``system.TObject``.
 
 
 Object variants
@@ -2330,14 +2363,26 @@ notation. (Thus an operator can have more than two parameters):
   assert `*+`(3, 4, 6) == `*`(a, `+`(b, c))
 
 
+Nonoverloadable builtins
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+The following builtin procs cannot be overloaded for reasons of implementation
+simplicity (they require specialized semantic checking)::
+
+  defined, definedInScope, compiles, low, high, sizeOf, 
+  is, of, echo, shallowCopy, getAst
+
+Thus they act more like keywords than like ordinary identifiers; unlike a 
+keyword however, a redefinition may `shadow`:id: the definition in 
+the ``system`` module.
+
 
 Var parameters
 ~~~~~~~~~~~~~~
 The type of a parameter may be prefixed with the ``var`` keyword:
 
 .. code-block:: nimrod
-  proc divmod(a, b: int,
-              res, remainder: var int) =
+  proc divmod(a, b: int; res, remainder: var int) =
     res = a div b
     remainder = a mod b
 
@@ -2355,8 +2400,7 @@ an l-value. Var parameters are implemented as hidden pointers. The
 above example is equivalent to:
 
 .. code-block:: nimrod
-  proc divmod(a, b: int,
-              res, remainder: ptr int) =
+  proc divmod(a, b: int; res, remainder: ptr int) =
     res[] = a div b
     remainder[] = a mod b
 
@@ -2818,7 +2862,7 @@ Ordinary vs immediate templates
 
 There are two different kinds of templates: `immediate`:idx: templates and
 ordinary templates. Ordinary templates take part in overloading resolution. As
-such their arguments needs to be type checked before the template is invoked.
+such their arguments need to be type checked before the template is invoked.
 So ordinary templates cannot receive undeclared identifiers:
 
 .. code-block:: nimrod
@@ -2949,8 +2993,8 @@ In templates identifiers can be constructed with the backticks notation:
 
   template typedef(name: expr, typ: typeDesc) {.immediate.} = 
     type
-      `T name`* = typ
-      `P name`* = ref `T name`
+      `T name`* {.inject.} = typ
+      `P name`* {.inject.} = ref `T name`
       
   typedef(myint, int)
   var x: PMyInt
@@ -2964,7 +3008,7 @@ Lookup rules for template parameters
 
 A parameter ``p`` in a template is even substituted in the expression ``x.p``.
 Thus template arguments can be used as field names and a global symbol can be
-covered by the same argument name even when fully qualified:
+shadowed by the same argument name even when fully qualified:
 
 .. code-block:: nimrod
   # module 'm'
@@ -2998,6 +3042,61 @@ But the global symbol can properly be captured by a ``bind`` statement:
 
   tstLev(levA)
   # produces: 'levA levB'
+
+
+Hygiene in templates
+~~~~~~~~~~~~~~~~~~~~
+
+Per default templates are `hygienic`:idx:\: Local identifiers declared in a
+template cannot be accessed in the instantiation context:
+
+.. code-block:: nimrod
+  
+  template newException*(exceptn: typeDesc, message: string): expr =
+    var
+      e: ref exceptn  # e is implicitely gensym'ed here
+    new(e)
+    e.msg = message
+    e
+    
+  # so this works:
+  let e = "message"
+  raise newException(EIO, e)
+
+
+Whether a symbol that is declared in a template is exposed to the instantiation
+scope is controlled by the `inject`:idx: and `gensym`:idx: pragmas: gensym'ed
+symbols are not exposed but inject'ed are.
+
+The default for symbols of entity ``type``, ``var``, ``let`` and ``const``
+is ``gensym`` and for ``proc``, ``iterator``, ``converter``, ``template``,
+``macro`` is ``inject``. However, if the name of the entity is passed as a 
+template parameter, it is an inject'ed symbol:
+
+.. code-block:: nimrod
+  template withFile(f, fn, mode: expr, actions: stmt): stmt {.immediate.} =
+    block:
+      var f: TFile  # since 'f' is a template param, it's injected implicitely
+      ...
+      
+  withFile(txt, "ttempl3.txt", fmWrite):
+    txt.writeln("line 1")
+    txt.writeln("line 2")
+
+
+The ``inject`` and ``gensym`` pragmas are second class annotations; they have
+no semantics outside of a template definition and cannot be abstracted over:
+
+.. code-block:: nimrod
+  {.pragma myInject: inject.}
+  
+  template t() =
+    var x {.myInject.}: int # does NOT work
+
+
+To get rid of hygiene in templates, one can use the `dirty`:idx: pragma for
+a template. ``inject`` and ``gensym`` have no effect in ``dirty`` templates.
+
 
 
 Macros
@@ -3066,6 +3165,54 @@ The macro call expands to:
   write(stdout, "x")
   write(stdout, ": ")
   writeln(stdout, x)
+
+
+BindSym
+~~~~~~~
+
+The above ``debug`` macro relies on the fact that ``write``, ``writeln`` and
+``stdout`` are declared in the system module and thus visible in the 
+instantiating context. There is a way to use bound identifiers
+(aka `symbols`:idx) instead of using unbound identifiers. The ``bindSym`` 
+builtin can be used for that:
+
+.. code-block:: nimrod
+  import macros
+
+  macro debug(n: expr): stmt =
+    result = newNimNode(nnkStmtList, n)
+    for i in 1..n.len-1:
+      # we can bind symbols in scope via 'bindSym':
+      add(result, newCall(bindSym"write", bindSym"stdout", toStrLit(n[i])))
+      add(result, newCall(bindSym"write", bindSym"stdout", newStrLitNode(": ")))
+      add(result, newCall(bindSym"writeln", bindSym"stdout", n[i]))
+
+  var
+    a: array [0..10, int]
+    x = "some string"
+  a[0] = 42
+  a[1] = 45
+
+  debug(a[0], a[1], x)
+
+The macro call expands to:
+
+.. code-block:: nimrod
+  write(stdout, "a[0]")
+  write(stdout, ": ")
+  writeln(stdout, a[0])
+
+  write(stdout, "a[1]")
+  write(stdout, ": ")
+  writeln(stdout, a[1])
+
+  write(stdout, "x")
+  write(stdout, ": ")
+  writeln(stdout, x)
+
+However, the symbols ``write``, ``writeln`` and ``stdout`` are already bound
+and are not looked up again. As the example shows, ``bindSym`` does work with
+overloaded symbols implicitely.
 
 
 Statement Macros
@@ -3639,6 +3786,25 @@ identifier *exactly as spelled*:
 
 Note that this pragma is somewhat of a misnomer: Other backends will provide
 the same feature under the same name.
+
+
+Bycopy pragma
+-------------
+
+The `bycopy`:idx: pragma can be applied to an object or tuple type and
+instructs the compiler to pass the type by value to procs:
+
+.. code-block:: nimrod
+  type
+    TVector {.bycopy, pure.} = object
+      x, y, z: float
+
+
+Byref pragma
+------------
+
+The `byref`:idx: pragma can be applied to an object or tuple type and instructs
+the compiler to pass the type by reference (hidden pointer) to procs.
 
 
 Varargs pragma

@@ -51,7 +51,7 @@ Library Additions
 - Added ``system.clamp`` to limit a value within an interval ``[a, b]``.
 - Added ``strutils.continuesWith``.
 - Added ``system.getStackTrace``.
-- Added ``system.||`` for parallel for loop support.
+- Added ``system.||`` for parallel ``for`` loop support.
 - The GC supports (soft) realtime systems via ``GC_setMaxPause`` 
   and ``GC_step`` procs.
 - The sockets module now supports ssl through the OpenSSL library, ``recvLine``
@@ -63,6 +63,8 @@ Library Additions
   only support fixed length arrays).
 - Added ``system.compiles`` which can be used to check whether a type supports
   some operation.
+- Added ``strutils.format``, ``subexes.format`` which use the 
+  new ``varargs`` type.
 
 
 Changes affecting backwards compatibility
@@ -103,6 +105,12 @@ Changes affecting backwards compatibility
   for procs it remains ``nimcall`` (which is compatible to ``closure``).
   Activate the warning ``ImplicitClosure`` to make the compiler list the 
   occurances of proc types which are affected.
+- The Nimrod type system now distinguishes ``openarray`` from ``varargs``.
+- Templates are now ``hygienic``. Use the ``dirty`` pragma to get the old
+  behaviour.
+- Objects that have no ancestor are now implicitely ``final``. Use 
+  the ``inheritable`` pragma to introduce new object roots apart 
+  from ``TObject``.
 
 
 Compiler Additions
@@ -121,6 +129,8 @@ Compiler Additions
   of the compiler and can thus generate documentation for symbols hiding in
   macros.
 - The compiler now supports the ``dynlib`` pragma for variables.
+- The compiler now supports ``bycopy`` and ``byref`` pragmas that affect how
+  objects/tuples are passed.
 
 
 Language Additions
@@ -145,6 +155,11 @@ Language Additions
 - A semicolon can now be used to have multiple simple statements on a single
   line: ``inc i; inc j``.
 - ``bind`` supports overloaded symbols and operators.
+- A ``distinct`` type can now borrow from generic procs.
+- Added the pragmas ``gensym``, ``inject`` and ``dirty`` for hygiene
+  in templates.
+- Comments can be continued with a backslash continuation character so that
+  comment pieces don't have to align on the same column.
 
 
 2012-02-09 Version 0.8.14 released

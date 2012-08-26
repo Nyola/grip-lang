@@ -165,7 +165,7 @@ type
   TThreadLocalStorage = array [0..1_000, float]
 
   PGcThread = ptr TGcThread
-  TGcThread {.pure.} = object
+  TGcThread {.pure, inheritable.} = object
     sys: TSysThread
     when emulatedThreadVars and not useStackMaskHack:
       tls: TThreadLocalStorage
@@ -203,6 +203,7 @@ when not defined(useNimRtl):
   when not useStackMaskHack:
     var mainThread: TGcThread
     ThreadVarSetValue(globalsSlot, addr(mainThread))
+    when not defined(createNimRtl): initStackBottom()
     initGC()
     
   when emulatedThreadVars:

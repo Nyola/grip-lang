@@ -141,13 +141,14 @@ proc low*[T](x: T): T {.magic: "Low", noSideEffect.}
   ## semantic rule, `x` may also be a type identifier.
 
 type
-  range*{.magic: "Range".} [T] ## Generic type to construct range types.
+  range*{.magic: "Range".}[T] ## Generic type to construct range types.
   array*{.magic: "Array".}[I, T]  ## Generic type to construct
                                   ## fixed-length arrays.
   openarray*{.magic: "OpenArray".}[T]  ## Generic type to construct open arrays.
                                        ## Open arrays are implemented as a
                                        ## pointer to the array data and a
                                        ## length field.
+  varargs*{.magic: "Varargs".}[T] ## Generic type to construct a varargs type.
   seq*{.magic: "Seq".}[T]  ## Generic type to construct sequences.
   set*{.magic: "Set".}[T]  ## Generic type to construct bit sets.
 
@@ -170,9 +171,12 @@ proc `..`*[T](b: T): TSlice[T] {.noSideEffect, inline.} =
 proc contains*[T](s: TSlice[T], value: T): bool {.noSideEffect, inline.} = 
   result = value >= s.a and value <= s.b
 
+when not defined(niminheritable):
+  {.pragma: inheritable.}
+
 when not defined(EcmaScript) and not defined(NimrodVM):
   type
-    TGenericSeq {.compilerproc, pure.} = object
+    TGenericSeq {.compilerproc, pure, inheritable.} = object
       len, reserved: int
     PGenericSeq {.exportc.} = ptr TGenericSeq
     # len and space without counting the terminating zero:
@@ -196,7 +200,7 @@ type
     ## is an int type ranging from one to the maximum value
     ## of an int. This type is often useful for documentation and debugging.
 
-  TObject* {.exportc: "TNimObject".} =
+  TObject* {.exportc: "TNimObject", inheritable.} =
     object ## the root of Nimrod's object hierarchy. Objects should
            ## inherit from TObject or one of its descendants. However,
            ## objects that have no ancestor are allowed.
@@ -347,7 +351,8 @@ proc newSeq*[T](s: var seq[T], len: int) {.magic: "NewSeq", noSideEffect.}
   ## This is equivalent to ``s = @[]; setlen(s, len)``, but more
   ## efficient since no reallocation is needed.
 
-proc len*[T: openArray](x: T): int {.magic: "LengthOpenArray", noSideEffect.}
+proc len*[TOpenArray: openArray|varargs](x: TOpenArray): int {.
+  magic: "LengthOpenArray", noSideEffect.}
 proc len*(x: string): int {.magic: "LengthStr", noSideEffect.}
 proc len*(x: cstring): int {.magic: "LengthStr", noSideEffect.}
 proc len*[I, T](x: array[I, T]): int {.magic: "LengthArray", noSideEffect.}
@@ -1238,8 +1243,8 @@ proc min*(x, y: int32): int32 {.magic: "MinI", noSideEffect.}
 proc min*(x, y: int64): int64 {.magic: "MinI64", noSideEffect.}
   ## The minimum value of two integers.
 
-proc min*[T](x: openarray[T]): T = 
-  ## The minimum value of an openarray.
+proc min*[T](x: varargs[T]): T = 
+  ## The minimum value of `x`.
   result = x[0]
   for i in 1..high(x): result = min(result, x[i])
 
@@ -1250,15 +1255,15 @@ proc max*(x, y: int32): int32 {.magic: "MaxI", noSideEffect.}
 proc max*(x, y: int64): int64 {.magic: "MaxI64", noSideEffect.}
   ## The maximum value of two integers.
 
-proc max*[T](x: openarray[T]): T = 
-  ## The maximum value of an openarray.
+proc max*[T](x: varargs[T]): T = 
+  ## The maximum value of `x`.
   result = x[0]
   for i in 1..high(x): result = max(result, x[i])
 
 proc clamp*[T](x, a, b: T): T =
   ## limits the value ``x`` within the interval [a, b] 
-  if x > a: return a
-  if x < b: return b
+  if x < a: return a
+  if x > b: return b
   return x
 
 iterator items*[T](a: openarray[T]): T {.inline.} =
@@ -1642,7 +1647,7 @@ else:
 
   proc add*(x: var cstring, y: cstring) {.magic: "AppendStrStr".}
 
-proc echo*[Ty](x: openarray[Ty]) {.magic: "Echo", noSideEffect.}
+proc echo*[T](x: varargs[T, `$`]) {.magic: "Echo", noSideEffect.}
   ## special built-in that takes a variable number of arguments. Each argument
   ## is converted to a string via ``$``, so it works for user-defined
   ## types that have an overloaded ``$`` operator.
@@ -1655,9 +1660,9 @@ proc echo*[Ty](x: openarray[Ty]) {.magic: "Echo", noSideEffect.}
   ## side effects, so that it can be used for debugging routines marked as
   ## ``noSideEffect``.
 
-template newException*(exceptn: typeDesc, message: string): expr = 
+template newException*(exceptn: typeDesc, message: string): expr =
   ## creates an exception object of type ``exceptn`` and sets its ``msg`` field
-  ## to `message`. Returns the new exception object. 
+  ## to `message`. Returns the new exception object.
   # block: # open a new scope
   var
     e: ref exceptn
@@ -1812,7 +1817,7 @@ when not defined(EcmaScript) and not defined(NimrodVM):
   proc write*(f: TFile, b: Bool)
   proc write*(f: TFile, c: char)
   proc write*(f: TFile, c: cstring)
-  proc write*(f: TFile, a: openArray[string])
+  proc write*(f: TFile, a: varargs[string, `$`])
     ## Writes a value to the file `f`. May throw an IO exception.
 
   proc readLine*(f: TFile): TaintedString
@@ -1831,7 +1836,7 @@ when not defined(EcmaScript) and not defined(NimrodVM):
     ## writes a value `x` to `f` and then writes "\n".
     ## May throw an IO exception.
 
-  proc writeln*[Ty](f: TFile, x: openArray[Ty]) {.inline.}
+  proc writeln*[Ty](f: TFile, x: varargs[Ty, `$`]) {.inline.}
     ## writes a value `x` to `f` and then writes "\n".
     ## May throw an IO exception.
 
@@ -1935,6 +1940,7 @@ when not defined(EcmaScript) and not defined(NimrodVM):
     include "system/syslocks"
     include "system/threads"
   elif not defined(nogc):
+    when not defined(useNimRtl) and not defined(createNimRtl): initStackBottom()
     initGC()
 
   proc setControlCHook*(hook: proc () {.noconv.})
@@ -2294,6 +2300,9 @@ template doAssert*(cond: bool, msg = "") =
     if not cond:
       raiseAssert(astToStr(cond) & ' ' & msg)
 
+when not defined(nimhygiene):
+  {.pragma: inject.}
+
 template onFailedAssert*(msg: expr, code: stmt): stmt =
   ## Sets an assertion failure handler that will intercept any assert statements
   ## following `onFailedAssert` in the current lexical scope.
@@ -2314,7 +2323,7 @@ template onFailedAssert*(msg: expr, code: stmt): stmt =
   ##     assert(...)
   ##
   template raiseAssert(msgIMPL: string): stmt =
-    let `msg` = msgIMPL
+    let msg {.inject.} = msgIMPL
     code
 
 proc shallow*[T](s: var seq[T]) {.noSideEffect, inline.} =
