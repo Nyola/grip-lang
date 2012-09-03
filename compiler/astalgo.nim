@@ -713,7 +713,7 @@ proc InitSymTab(tab: var TSymTab) =
 proc DeinitSymTab(tab: var TSymTab) = 
   tab.stack = nil
 
-proc SymTabLocalGet(tab: TSymTab, s: PIdent): PSym = 
+proc SymTabLocalGet*(tab: TSymTab, s: PIdent): PSym =
   result = StrTableGet(tab.stack[tab.tos - 1], s)
 
 proc SymTabGet(tab: TSymTab, s: PIdent): PSym = 

@@ -466,6 +466,11 @@ proc newLineInfo*(fileInfoIdx: int32, line, col: int): TLineInfo =
 proc newLineInfo*(filename: string, line, col: int): TLineInfo {.inline.} =
   result = newLineInfo(filename.fileInfoIdx, line, col)
 
+proc `<`*(lhs, rhs: TLineInfo): bool =
+  if lhs.line < rhs.line: return true
+  if lhs.line > rhs.line: return false
+  return lhs.col < rhs.col
+
 fileInfos.add(newFileInfo("", "command line"))
 var gCmdLineInfo* = newLineInfo(int32(0), 1, 1)
 

@@ -228,7 +228,7 @@ proc lineinfo(g: PGripFile, p: TPos): TLineInfo =
 proc lineinfo(g: PGripFile, line, col: int): TLineInfo =
   return newLineInfo(g.fileIdx, line, col)
 
-template scanLine(g, p, charClass: expr, body: stmt): stmt =
+template scanLine(g, p, charClass: expr, body: stmt): stmt {.immediate, dirty.} =
   var
     scanStart = p
     line = lineAt(g, p)
@@ -297,7 +297,7 @@ proc scanWhiteSpace(g: PGripFile, pos: var TPos): TWhiteSpace =
 
 const nkLiterals = { nkIntLit, nkStrLit, nkFloatLit }
 
-proc sexp(id: Pnode, sons: openarray[PNode]): PNode =
+proc sexp(id: Pnode, sons: varargs[PNode]): PNode =
   if id.kind == nkIdent:
     if id.ident.id == ord(wDot):
       result = newNode(nkDotExpr, id.info, sons[0..1])
@@ -706,8 +706,6 @@ proc CompileGrip(module: PSym, filename: string, stream: PLLStream) =
     nodes.sons[i] = semGrip(c, nodes[i])
   
   var passData = (input: nodes, closeOutput: nimSem.close(c, nil))
-
-  passData = carryPass(transfPass(), module, filename, passData)
   discard carryPass(cgenPass(), module, filename, passData)
 
 passes.grip = CompileGrip

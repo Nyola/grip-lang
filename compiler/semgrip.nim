@@ -106,6 +106,7 @@ proc preSemGrip(c: PContext, n: PNode): PNode =
       nil
   
   echo "EXITING SEM GRIP"
+  debug result
 
 proc semGrip*(c: PContext, n: PNode): PNode =
   result = preSemGrip(c, n)

@@ -238,6 +238,21 @@ proc semIdentDef(c: PContext, n: PNode, kind: TSymKind): PSym =
     result = semIdentWithPragma(c, kind, n, {})
   suggestSym(n, result)
 
+proc addVarDecl(c: PContext, n: PNode, v: PSym) =
+  var prev = SymTabLocalGet(c.tab, v.name)
+  if prev != nil:
+    if prev.kind notin { skConst, skVar, skLet }:
+      LocalError(v.info, errAttemptToRedefine, v.name.s)
+    else:
+      internalAssert prev.typ != nil and v.typ != nil
+      if not SameType(prev.typ, v.typ):
+        typeMismatch(n, prev.typ, v.typ)
+      else:
+        v.next = prev
+        SymTabReplace(c.tab.stack[c.tab.tos - 1], prev, v)
+  else:
+    if sfGenSym notin v.flags: addInterfaceDecl(c, v)
+
 proc semVarOrLet(c: PContext, n: PNode, symkind: TSymKind): PNode = 
   var b: PNode
   result = copyNode(n)
@@ -285,7 +300,6 @@ proc semVarOrLet(c: PContext, n: PNode, symkind: TSymKind): PNode =
       Message(a.info, warnEachIdentIsTuple)
     for j in countup(0, length-3):
       var v = semIdentDef(c, a.sons[j], symkind)
-      if sfGenSym notin v.flags: addInterfaceDecl(c, v)
       when oKeepVariableNames:
         if c.InUnrolledContext > 0: v.flags.incl(sfShadowed)
         else:
@@ -305,6 +319,7 @@ proc semVarOrLet(c: PContext, n: PNode, symkind: TSymKind): PNode =
       else: 
         v.typ = tup.sons[j]
         b.sons[j] = newSymNode(v)
+      addVarDecl(c, n, v)
     
 proc semConst(c: PContext, n: PNode): PNode = 
   result = copyNode(n)
@@ -333,7 +348,7 @@ proc semConst(c: PContext, n: PNode): PNode =
       continue
     v.typ = typ
     v.ast = def               # no need to copy
-    if sfGenSym notin v.flags: addInterfaceDecl(c, v)
+    addVarDecl(c, n, v)
     var b = newNodeI(nkConstDef, a.info)
     addSon(b, newSymNode(v))
     addSon(b, ast.emptyNode)            # no type description

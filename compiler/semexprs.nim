@@ -1435,6 +1435,10 @@ proc semExpr(c: PContext, n: PNode, flags: TExprFlags = {}): PNode =
   case n.kind
   of nkIdent, nkAccQuoted:
     var s = lookUp(c, n)
+    if s.next != nil:
+      while s.next.info > n.info:
+        s = s.next
+        if s == nil: LocalError(n.info, errUndeclaredIdentifier, n.ident.s)
     semCaptureSym(s, c.p.owner)
     result = semSym(c, n, s, flags)
   of nkSym:
