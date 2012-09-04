@@ -65,18 +65,17 @@ proc inlineConst(n: PNode, s: PSym): PNode {.inline.} =
   result.typ = s.typ
   result.info = n.info
 
+proc performProcvarCheck(c: PContext, n: PNode, s: PSym) =
+  # XXX this not correct; it's valid to pass to templates and macros.
+  # We really need another post nkCallConv check for this. Or maybe do it
+  # in transform().
+  var smoduleId = getModule(s).id
+  if sfProcVar notin s.flags and s.typ.callConv == ccDefault and
+      smoduleId != c.module.id and smoduleId != c.friendModule.id: 
+    LocalError(n.info, errXCannotBePassedToProcVar, s.name.s)
+  
 proc semSym(c: PContext, n: PNode, s: PSym, flags: TExprFlags): PNode = 
   case s.kind
-  of skProc, skMethod, skIterator, skConverter: 
-    var smoduleId = getModule(s).id
-    if sfProcVar notin s.flags and s.typ.callConv == ccDefault and
-        smoduleId != c.module.id and smoduleId != c.friendModule.id: 
-      LocalError(n.info, errXCannotBePassedToProcVar, s.name.s)
-    result = symChoice(c, n, s, scClosed)
-    if result.kind == nkSym:
-      markIndirect(c, result.sym)
-      if isGenericRoutine(result.sym):
-        LocalError(n.info, errInstantiateXExplicitely, s.name.s)
   of skConst:
     markUsed(n, s)
     case skipTypes(s.typ, abstractInst).kind
@@ -98,14 +97,15 @@ proc semSym(c: PContext, n: PNode, s: PSym, flags: TExprFlags): PNode =
       else: result = newSymNode(s, n.info)
     else:
       result = newSymNode(s, n.info)
-  of skMacro: result = semMacroExpr(c, n, s)
+  of skMacro: result = semMacroExpr(c, n, n, s)
   of skTemplate: result = semTemplateExpr(c, n, s)
   of skVar, skLet, skResult, skParam, skForVar:
     markUsed(n, s)
     # if a proc accesses a global variable, it is not side effect free:
     if sfGlobal in s.flags:
       incl(c.p.owner.flags, sfSideEffect)
-    elif s.kind == skParam and s.typ.kind == tyExpr:
+    elif s.kind == skParam and s.typ.kind == tyExpr and s.typ.n != nil:
+      # XXX see the hack in sigmatch.nim ...
       return s.typ.n
     result = newSymNode(s, n.info)
     # We cannot check for access to outer vars for example because it's still
@@ -705,7 +705,7 @@ proc semDirectOp(c: PContext, n: PNode, flags: TExprFlags): PNode =
       return errorNode(c, n)
   let callee = result.sons[0].sym
   case callee.kind
-  of skMacro: result = semMacroExpr(c, nOrig, callee)
+  of skMacro: result = semMacroExpr(c, result, nOrig, callee)
   of skTemplate: result = semTemplateExpr(c, nOrig, callee)
   else:
     fixAbstractType(c, result)
@@ -1398,7 +1398,8 @@ proc semBlockExpr(c: PContext, n: PNode): PNode =
   closeScope(c.tab)
   Dec(c.p.nestedBlockCounter)
 
-proc semMacroStmt(c: PContext, n: PNode, semCheck = true): PNode = 
+proc semMacroStmt(c: PContext, n: PNode, semCheck = true): PNode =
+  # XXX why no overloading here?
   checkMinSonsLen(n, 2)
   var a: PNode
   if isCallExpr(n.sons[0]): a = n.sons[0].sons[0]
@@ -1407,7 +1408,7 @@ proc semMacroStmt(c: PContext, n: PNode, semCheck = true): PNode =
   if s != nil: 
     case s.kind
     of skMacro: 
-      result = semMacroExpr(c, n, s, semCheck)
+      result = semMacroExpr(c, n, n, s, semCheck)
     of skTemplate: 
       # transform
       # nkMacroStmt(nkCall(a...), stmt, b...)
@@ -1441,6 +1442,13 @@ proc semExpr(c: PContext, n: PNode, flags: TExprFlags = {}): PNode =
         if s == nil: LocalError(n.info, errUndeclaredIdentifier, n.ident.s)
     semCaptureSym(s, c.p.owner)
     result = semSym(c, n, s, flags)
+    if s.kind in {skProc, skMethod, skIterator, skConverter}:
+      performProcvarCheck(c, n, s)
+      result = symChoice(c, n, s, scClosed)
+      if result.kind == nkSym:
+        markIndirect(c, result.sym)
+        if isGenericRoutine(result.sym):
+          LocalError(n.info, errInstantiateXExplicitely, s.name.s)
   of nkSym:
     # because of the changed symbol binding, this does not mean that we
     # don't have to check the symbol for semantics here again!
@@ -1503,16 +1511,16 @@ proc semExpr(c: PContext, n: PNode, flags: TExprFlags = {}): PNode =
     if s != nil: 
       case s.kind
       of skMacro:
-        if false and sfImmediate notin s.flags: # XXX not yet enabled
+        if sfImmediate notin s.flags:
           result = semDirectOp(c, n, flags)
         else:
-          result = semMacroExpr(c, n, s)
+          result = semMacroExpr(c, n, n, s)
       of skTemplate:
         if sfImmediate notin s.flags:
           result = semDirectOp(c, n, flags)
         else:
           result = semTemplateExpr(c, n, s)
-      of skType: 
+      of skType:
         # XXX think about this more (``set`` procs)
         if n.len == 2:
           result = semConv(c, n, s)
@@ -1594,3 +1602,4 @@ proc semExpr(c: PContext, n: PNode, flags: TExprFlags = {}): PNode =
     LocalError(n.info, errInvalidExpressionX,
                renderTree(n, {renderNoComments}))
   incl(result.flags, nfSem)
+  result = applyPatterns(c, result)

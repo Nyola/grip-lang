@@ -93,6 +93,8 @@ template fail* =
   checkpoints = @[]
 
 macro check*(conditions: stmt): stmt =
+  let conditions = callsite()
+  
   proc standardRewrite(e: PNimrodNode): PNimrodNode =
     template rewrite(Exp, lineInfoLit: expr, expLit: string): stmt =
       if not Exp:
@@ -152,6 +154,7 @@ template require*(conditions: stmt): stmt {.dirty.} =
     check conditions
 
 macro expect*(exp: stmt): stmt =
+  let exp = callsite()
   template expectBody(errorTypes, lineInfoLit: expr,
                       body: stmt): PNimrodNode {.dirty.} =
     try:

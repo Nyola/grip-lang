@@ -201,6 +201,8 @@ type
     nkProcTy,             # proc type
     nkEnumTy,             # enum body
     nkEnumFieldDef,       # `ident = expr` in an enumeration
+    nkArgList,            # argument list
+    nkPattern,            # a special pattern; used for matching
     nkReturnToken,        # token used for interpretation
     nkClosure,            # (prc, env)-pair (internally used for code gen)
     nkGotoState,          # used for the state machine (for iterators)
@@ -247,8 +249,8 @@ type
                       # for interfacing with C++, JS
     sfNamedParamCall, # symbol needs named parameter call syntax in target
                       # language; for interfacing with Objective C
-    sfDiscardable     # returned value may be discarded implicitely
-    sfDestructor      # proc is destructor
+    sfDiscardable,    # returned value may be discarded implicitely
+    sfDestructor,     # proc is destructor
     sfGenSym          # symbol is 'gensym'ed; do not add to symbol table
 
   TSymFlags* = set[TSymFlag]
@@ -442,7 +444,7 @@ type
     mNIntVal, mNFloatVal, mNSymbol, mNIdent, mNGetType, mNStrVal, mNSetIntVal, 
     mNSetFloatVal, mNSetSymbol, mNSetIdent, mNSetType, mNSetStrVal, mNLineInfo,
     mNNewNimNode, mNCopyNimNode, mNCopyNimTree, mStrToIdent, mIdentToStr, 
-    mNBindSym,
+    mNBindSym, mNCallSite,
     mEqIdent, mEqNimrodNode, mNHint, mNWarning, mNError, 
     mInstantiationInfo, mGetTypeInfo
 
@@ -587,7 +589,7 @@ type
                               # for a conditional:
                               # 1 iff the symbol is defined, else 0
                               # (or not in symbol table)
-                              # for modules, a unique index correspinding
+                              # for modules, a unique index corresponding
                               # to the order of compilation 
     offset*: int              # offset of record field
     loc*: TLoc
@@ -619,6 +621,7 @@ type
     align*: int               # the type's alignment requirements
     containerID*: int         # used for type checking of generics
     loc*: TLoc
+    constraint*: PNode        # additional constraints like 'lit|result'
 
   TPair*{.final.} = object 
     key*, val*: PObject
@@ -690,12 +693,14 @@ const
     skMacro, skTemplate, skConverter, skEnumField, skLet, skStub}
   PersistentNodeFlags*: TNodeFlags = {nfBase2, nfBase8, nfBase16, nfAllConst}
   namePos* = 0
-  genericParamsPos* = 1
-  paramsPos* = 2
-  pragmasPos* = 3
-  bodyPos* = 4       # position of body; use rodread.getBody() instead!
-  resultPos* = 5
-  dispatcherPos* = 6 # caution: if method has no 'result' it can be position 5!
+  patternPos* = 1    # empty except for term rewriting macros
+  genericParamsPos* = 2
+  paramsPos* = 3
+  pragmasPos* = 4
+  exceptionPos* = 5  # will be used for exception tracking
+  bodyPos* = 6       # position of body; use rodread.getBody() instead!
+  resultPos* = 7
+  dispatcherPos* = 8 # caution: if method has no 'result' it can be position 5!
 
   nkCallKinds* = {nkCall, nkInfix, nkPrefix, nkPostfix,
                   nkCommand, nkCallStrLit}
@@ -866,13 +871,22 @@ proc newSymNode*(sym: PSym, info: TLineInfo): PNode =
   result.typ = sym.typ
   result.info = info
 
-proc newNodeI(kind: TNodeKind, info: TLineInfo): PNode = 
-  result = newNode(kind)
+proc newNodeI(kind: TNodeKind, info: TLineInfo): PNode =
+  new(result)
+  result.kind = kind
   result.info = info
+
+proc newNodeI*(kind: TNodeKind, info: TLineInfo, children: int): PNode =
+  new(result)
+  result.kind = kind
+  result.info = info
+  if children > 0:
+    newSeq(result.sons, children)
 
 proc newNode*(kind: TNodeKind, info: TLineInfo, sons: TNodeSeq = @[],
              typ: PType = nil): PNode =
-  result = newNode(kind)
+  new(result)
+  result.kind = kind
   result.info = info
   result.typ = typ
   # XXX use shallowCopy here for ownership transfer:
@@ -1179,6 +1193,11 @@ proc isRoutine*(s: PSym): bool {.inline.} =
   result = s.kind in {skProc, skTemplate, skMacro, skIterator, skMethod,
                       skConverter}
 
+proc hasPattern*(s: PSym): bool {.inline.} =
+  result = isRoutine(s) and s.ast.sons[patternPos].kind != nkEmpty
+
 iterator items*(n: PNode): PNode =
   for i in 0.. <n.len: yield n.sons[i]
 
+proc isAtom*(n: PNode): bool {.inline.} =
+  result = n.kind >= nkNone and n.kind <= nkNilLit

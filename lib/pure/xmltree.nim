@@ -258,16 +258,17 @@ proc xmlConstructor(e: PNimrodNode): PNimrodNode {.compileTime.} =
   else:
     result = newCall("newXmlTree", toStrLit(a))
 
-macro `<>`*(x: expr): expr = 
+macro `<>`*(x: expr): expr {.immediate.} = 
   ## Constructor macro for XML. Example usage:
   ##
   ## .. code-block:: nimrod
-  ##   <>a(href="http://force7.de/nimrod", "Nimrod rules.")
+  ##   <>a(href="http://nimrod-code.org", "Nimrod rules.")
   ##
   ## Produces an XML tree for::
   ##
-  ##  <a href="http://force7.de/nimrod">Nimrod rules.</a>
+  ##  <a href="http://nimrod-code.org">Nimrod rules.</a>
   ##
+  let x = callsite()
   result = xmlConstructor(x)
 
 proc child*(n: PXmlNode, name: string): PXmlNode =

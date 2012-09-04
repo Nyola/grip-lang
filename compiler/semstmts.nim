@@ -532,13 +532,12 @@ proc semTry(c: PContext, n: PNode): PNode =
     a.sons[length - 1] = semStmtScope(c, a.sons[length - 1])
   dec c.p.inTryStmt
 
-proc addGenericParamListToScope(c: PContext, n: PNode) = 
-  if n.kind != nkGenericParams: 
-    InternalError(n.info, "addGenericParamListToScope")
-  for i in countup(0, sonsLen(n)-1): 
+proc addGenericParamListToScope(c: PContext, n: PNode) =
+  if n.kind != nkGenericParams: illFormedAst(n)
+  for i in countup(0, sonsLen(n)-1):
     var a = n.sons[i]
     if a.kind == nkSym: addDecl(c, a.sym)
-    else: internalError(a.info, "addGenericParamListToScope")
+    else: illFormedAst(a)
 
 proc typeSectionLeftSidePass(c: PContext, n: PNode) = 
   # process the symbols on the left side for the whole type section, before
@@ -650,7 +649,7 @@ proc semParamList(c: PContext, n, genericParams: PNode, s: PSym) =
 proc addParams(c: PContext, n: PNode, kind: TSymKind) = 
   for i in countup(1, sonsLen(n)-1): 
     if n.sons[i].kind == nkSym: addParamOrResult(c, n.sons[i].sym, kind)
-    else: InternalError(n.info, "addParams")
+    else: illFormedAst(n)
 
 proc semBorrow(c: PContext, n: PNode, s: PSym) = 
   # search for the correct alias:
@@ -786,6 +785,10 @@ proc semProcAux(c: PContext, n: PNode, kind: TSymKind,
   else:
     s.typ = newTypeS(tyProc, c)
     rawAddSon(s.typ, nil)
+  if n.sons[patternPos].kind != nkEmpty:
+    n.sons[patternPos] = semPattern(c, n.sons[patternPos])
+    c.patterns.add(s)
+  
   var proto = SearchForProc(c, s, c.tab.tos-2) # -2 because we have a scope
                                                # open for parameters
   if proto == nil: 
@@ -908,13 +911,10 @@ proc semConverterDef(c: PContext, n: PNode): PNode =
 
 proc semMacroDef(c: PContext, n: PNode): PNode = 
   checkSonsLen(n, bodyPos + 1)
-  if n.sons[genericParamsPos].kind != nkEmpty: 
-    LocalError(n.info, errNoGenericParamsAllowedForX, "macro")
   result = semProcAux(c, n, skMacro, macroPragmas)
   var s = result.sons[namePos].sym
   var t = s.typ
   if t.sons[0] == nil: LocalError(n.info, errXNeedsReturnType, "macro")
-  if sonsLen(t) != 2: LocalError(n.info, errXRequiresOneArgument, "macro")
   if n.sons[bodyPos].kind == nkEmpty:
     LocalError(n.info, errImplOfXexpected, s.name.s)
   
@@ -948,6 +948,8 @@ proc semStaticStmt(c: PContext, n: PNode): PNode =
   result = evalStaticExpr(c.module, a)
   if result.isNil:
     LocalError(n.info, errCannotInterpretNodeX, renderTree(n))
+  elif result.kind == nkEmpty:
+    result = newNodeI(nkNilLit, n.info)
 
 # special marker values that indicates that we are
 # 1) AnalyzingDestructor: currenlty analyzing the type for destructor 
@@ -1221,7 +1223,7 @@ proc SemStmt(c: PContext, n: PNode): PNode =
     result = semPragmaBlock(c, n)
   of nkStaticStmt:
     result = semStaticStmt(c, n)
-  else: 
+  else:
     # in interactive mode, we embed the expression in an 'echo':
     if gCmd == cmdInteractive:
       result = buildEchoStmt(c, semExpr(c, n))
@@ -1233,10 +1235,11 @@ proc SemStmt(c: PContext, n: PNode): PNode =
     InternalError(n.info, "SemStmt: result = nil")
     # error correction:
     result = emptyNode
-  else: 
+  else:
     incl(result.flags, nfSem)
+  result = applyPatterns(c, result)
 
-proc semStmtScope(c: PContext, n: PNode): PNode = 
+proc semStmtScope(c: PContext, n: PNode): PNode =
   openScope(c.tab)
   result = semStmt(c, n)
   closeScope(c.tab)

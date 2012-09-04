@@ -89,7 +89,7 @@ proc semBindStmt(c: PContext, n: PNode, toBind: var TIntSet): PNode =
         for x in items(sc): toBind.incl(x.sym.id)
     else:
       illFormedAst(a)
-  result = newNodeI(nkEmpty, n.info)
+  result = newNodeI(nkNilLit, n.info)
   
 proc replaceIdentBySym(n: var PNode, s: PNode) =
   case n.kind
@@ -166,12 +166,11 @@ proc semRoutineInTemplBody(c: var TemplCtx, n: PNode, k: TSymKind): PNode =
   else:
     n.sons[namePos] = semTemplBody(c, n.sons[namePos])
   openScope(c)
-  n.sons[genericParamsPos] = semTemplBody(c, n.sons[genericParamsPos])
-  n.sons[paramsPos] = semTemplBody(c, n.sons[paramsPos])
-  n.sons[pragmasPos] = semTemplBody(c, n.sons[pragmasPos])
-  n.sons[bodyPos] = semTemplBodyScope(c, n.sons[bodyPos])
+  for i in patternPos..bodyPos:
+    n.sons[i] = semTemplBody(c, n.sons[i])
   closeScope(c)
 
+proc semPattern(c: PContext, n: PNode): PNode
 proc semTemplBody(c: var TemplCtx, n: PNode): PNode = 
   result = n
   case n.kind
@@ -183,8 +182,9 @@ proc semTemplBody(c: var TemplCtx, n: PNode): PNode =
         result = newSymNode(s, n.info)
       elif Contains(c.toBind, s.id):
         result = symChoice(c.c, n, s, scClosed)
-      elif s.owner == c.owner:
-        InternalAssert sfGenSym in s.flags
+      elif s.owner == c.owner and sfGenSym in s.flags:
+        # template tmp[T](x: var seq[T]) =
+        # var yz: T
         incl(s.flags, sfUsed)
         result = newSymNode(s, n.info)
   of nkBind:
@@ -297,8 +297,9 @@ proc semTemplBody(c: var TemplCtx, n: PNode): PNode =
     # so we use the generic code for nkDotExpr too
     if n.kind == nkDotExpr or n.kind == nkAccQuoted:
       let s = QualifiedLookUp(c.c, n, {})
-      if s != nil and Contains(c.toBind, s.id):
-        return symChoice(c.c, n, s, scClosed)
+      if s != nil:
+        if Contains(c.toBind, s.id):
+          return symChoice(c.c, n, s, scClosed)
     result = n
     for i in countup(0, sonsLen(n) - 1):
       result.sons[i] = semTemplBody(c, n.sons[i])
@@ -364,21 +365,35 @@ proc semTemplateDef(c: PContext, n: PNode): PNode =
   n.sons[namePos] = newSymNode(s, n.sons[namePos].info)
   if n.sons[pragmasPos].kind != nkEmpty:
     pragma(c, s, n.sons[pragmasPos], templatePragmas)
-  # check that no generic parameters exist:
+
+  var gp: PNode
   if n.sons[genericParamsPos].kind != nkEmpty: 
-    LocalError(n.info, errNoGenericParamsAllowedForX, "template")
-  if n.sons[paramsPos].kind == nkEmpty: 
-    # use ``stmt`` as implicit result type
-    s.typ = newTypeS(tyProc, c)
-    s.typ.n = newNodeI(nkFormalParams, n.info)
-    rawAddSon(s.typ, newTypeS(tyStmt, c))
-    addSon(s.typ.n, newNodeIT(nkType, n.info, s.typ.sons[0]))
+    n.sons[genericParamsPos] = semGenericParamList(c, n.sons[genericParamsPos])
+    gp = n.sons[genericParamsPos]
   else: 
-    semParamList(c, n.sons[ParamsPos], nil, s)
-    if n.sons[paramsPos].sons[0].kind == nkEmpty: 
+    gp = newNodeI(nkGenericParams, n.info)
+  # process parameters:
+  if n.sons[paramsPos].kind != nkEmpty:
+    semParamList(c, n.sons[ParamsPos], gp, s)
+    if sonsLen(gp) > 0:
+      if n.sons[genericParamsPos].kind == nkEmpty:
+        # we have a list of implicit type parameters:
+        n.sons[genericParamsPos] = gp
+    # no explicit return type? -> use tyStmt
+    if n.sons[paramsPos].sons[0].kind == nkEmpty:
       # use ``stmt`` as implicit result type
       s.typ.sons[0] = newTypeS(tyStmt, c)
       s.typ.n.sons[0] = newNodeIT(nkType, n.info, s.typ.sons[0])
+  else:
+    s.typ = newTypeS(tyProc, c)
+    # XXX why do we need tyStmt as a return type again?
+    s.typ.n = newNodeI(nkFormalParams, n.info)
+    rawAddSon(s.typ, newTypeS(tyStmt, c))
+    addSon(s.typ.n, newNodeIT(nkType, n.info, s.typ.sons[0]))
+  if n.sons[patternPos].kind != nkEmpty:
+    n.sons[patternPos] = semPattern(c, n.sons[patternPos])
+    c.patterns.add(s)
+
   var ctx: TemplCtx
   ctx.toBind = initIntSet()
   ctx.c = c
@@ -403,3 +418,109 @@ proc semTemplateDef(c: PContext, n: PNode): PNode =
   else:
     SymTabReplace(c.tab.stack[curScope], proto, s)
 
+proc semPatternBody(c: var TemplCtx, n: PNode): PNode =
+  template templToExpand(s: expr): expr =
+    s.kind == skTemplate and (s.typ.len == 1 or sfImmediate in s.flags)
+  
+  proc handleSym(c: var TemplCtx, n: PNode, s: PSym): PNode =
+    if s != nil:
+      if s.owner == c.owner and s.kind == skParam:
+        incl(s.flags, sfUsed)
+        result = newSymNode(s, n.info)
+      elif Contains(c.toBind, s.id):
+        result = symChoice(c.c, n, s, scClosed)
+      elif templToExpand(s):
+        result = semPatternBody(c, semTemplateExpr(c.c, n, s, false))
+      else:
+        result = symChoice(c.c, n, s, scOpen)
+    else:
+      result = n
+  
+  proc expectParam(c: var TemplCtx, n: PNode): PNode =
+    let s = QualifiedLookUp(c.c, n, {})
+    if s != nil and s.owner == c.owner and s.kind == skParam:
+      incl(s.flags, sfUsed)
+      result = newSymNode(s, n.info)
+    else:
+      localError(n.info, errInvalidExpression)
+      result = n
+  
+  result = n
+  case n.kind
+  of nkIdent:
+    let s = QualifiedLookUp(c.c, n, {})
+    result = handleSym(c, n, s)
+  of nkBindStmt:
+    result = semBindStmt(c.c, n, c.toBind)
+  of nkEmpty, nkSym..nkNilLit: nil
+  of nkCurlyExpr:
+    # we support '(pattern){x}' to bind a subpattern to a parameter 'x':
+    if n.len != 2 or n.sons[1].kind != nkIdent:
+      localError(n.info, errInvalidExpression)
+    else:
+      n.sons[0] = semPatternBody(c, n.sons[0])
+      n.sons[1] = expectParam(c, n.sons[1])
+  of nkCallKinds:
+    let s = QualifiedLookUp(c.c, n.sons[0], {})
+    if s != nil:
+      if s.owner == c.owner and s.kind == skParam: nil
+      elif Contains(c.toBind, s.id): nil
+      elif templToExpand(s):
+        return semPatternBody(c, semTemplateExpr(c.c, n, s, false))
+    
+    if n.kind == nkInfix and n.sons[0].kind == nkIdent:
+      # we interpret `*` and `|` only as pattern operators if they occur in
+      # infix notation, so that '`*`(a, b)' can be used for verbatim matching:
+      let opr = n.sons[0]
+      if opr.ident.s == "*":
+        result = newNodeI(nkPattern, n.info, n.len)
+        result.sons[0] = opr
+        result.sons[1] = semPatternBody(c, n.sons[1])
+        result.sons[2] = expectParam(c, n.sons[2])
+        return
+      elif opr.ident.s == "|":
+        result = newNodeI(nkPattern, n.info, n.len)
+        result.sons[0] = opr
+        result.sons[1] = semPatternBody(c, n.sons[1])
+        result.sons[2] = semPatternBody(c, n.sons[2])
+        return
+    
+    if n.kind == nkPrefix and n.sons[0].kind == nkIdent:
+      let opr = n.sons[0]
+      if opr.ident.s == "~":
+        result = newNodeI(nkPattern, n.info, n.len)
+        result.sons[0] = opr
+        result.sons[1] = semPatternBody(c, n.sons[1])
+        return
+    
+    for i in countup(0, sonsLen(n) - 1):
+      result.sons[i] = semPatternBody(c, n.sons[i])
+  else:
+    # dotExpr is ambiguous: note that we explicitely allow 'x.TemplateParam',
+    # so we use the generic code for nkDotExpr too
+    case n.kind 
+    of nkDotExpr, nkAccQuoted:
+      let s = QualifiedLookUp(c.c, n, {})
+      if s != nil:
+        if Contains(c.toBind, s.id):
+          return symChoice(c.c, n, s, scClosed)
+        return symChoice(c.c, n, s, scOpen)
+    of nkPar:
+      if n.len == 1: return semPatternBody(c, n.sons[0])
+    else: nil
+    for i in countup(0, sonsLen(n) - 1):
+      result.sons[i] = semPatternBody(c, n.sons[i])
+
+proc semPattern(c: PContext, n: PNode): PNode =
+  openScope(c.tab)
+  var ctx: TemplCtx
+  ctx.toBind = initIntSet()
+  ctx.c = c
+  ctx.owner = getCurrOwner()
+  result = flattenStmts(semPatternBody(ctx, n))
+  if result.kind in {nkStmtList, nkStmtListExpr}:
+    if result.len == 1:
+      result = result.sons[0]
+    elif result.len == 0:
+      LocalError(n.info, errInvalidExpression)
+  closeScope(c.tab)

@@ -65,7 +65,7 @@ Library Additions
   some operation.
 - Added ``strutils.format``, ``subexes.format`` which use the 
   new ``varargs`` type.
-
+- Added module ``fsmonitor``.
 
 Changes affecting backwards compatibility
 -----------------------------------------
@@ -111,6 +111,8 @@ Changes affecting backwards compatibility
 - Objects that have no ancestor are now implicitely ``final``. Use 
   the ``inheritable`` pragma to introduce new object roots apart 
   from ``TObject``.
+- Macros now receive parameters like templates do; use the ``callsite`` builtin
+  to gain access to the invocation AST.
 
 
 Compiler Additions

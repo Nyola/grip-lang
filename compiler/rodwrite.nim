@@ -233,6 +233,9 @@ proc encodeType(w: PRodWriter, t: PType, result: var string) =
   if t.containerID != 0: 
     add(result, '@')
     encodeVInt(t.containerID, result)
+  if t.constraint != nil:
+    add(result, '`')
+    encodeNode(w, UnknownLineInfo(), t.constraint, result)
   encodeLoc(w, t.loc, result)
   for i in countup(0, sonsLen(t) - 1): 
     if t.sons[i] == nil: 
@@ -357,10 +360,10 @@ proc symStack(w: PRodWriter): int =
           add(w.compilerProcs, ' ')
           encodeVInt(s.id, w.compilerProcs)
           add(w.compilerProcs, rodNL)
-        if s.kind == skConverter: 
+        if s.kind == skConverter or hasPattern(s):
           if w.converters.len != 0: add(w.converters, ' ')
           encodeVInt(s.id, w.converters)
-        elif s.kind == skMethod and sfDispatcher notin s.flags:
+        if s.kind == skMethod and sfDispatcher notin s.flags:
           if w.methods.len != 0: add(w.methods, ' ')
           encodeVInt(s.id, w.methods)
       elif IiTableGet(w.imports.tab, s.id) == invalidKey: 
