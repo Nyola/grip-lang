@@ -1,3 +1,16 @@
 export HOME
-: libgrip.nim |> nimrod c -d:debug --skipParentCfg %f |> lib%B.dylib
+export APPDATA
+
+ifeq (@(TUP_PLATFORM),win32)
+  # work arround tup windows 8 bug
+  # LIBGRIP_OUT = libgrip.dll libgrip.lib libgrip.ilk libgrip.pdb libgrip.exp
+else
+  ifeq (@(TUP_PLATFORM),macosx)
+    LIBGRIP_OUT = liblibgrip.dylib
+  else
+    LIBGRIP_OUT = liblibgrip.so
+  endif
+endif
+
+: libgrip.nim |> nimrod c -d:debug --skipParentCfg %f |> $(LIBGRIP_OUT)
 

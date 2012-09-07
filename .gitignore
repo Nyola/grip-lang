@@ -3,6 +3,12 @@
 *.so
 *.zip
 *.iss
+*.pdb
+*.ilk
+*.lib
+*.exp
+*.dll
+.tup/
 nimcache
 lib/nimcache
 tools/nimcache
