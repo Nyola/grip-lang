@@ -386,6 +386,7 @@ proc lsub(n: PNode): int =
   of nkDotExpr: result = lsons(n) + 1
   of nkBind: result = lsons(n) + len("bind_")
   of nkBindStmt: result = lcomma(n) + len("bind_")
+  of nkMixinStmt: result = lcomma(n) + len("mixin_")
   of nkCheckedFieldExpr: result = lsub(n.sons[0])
   of nkLambda: result = lsons(n) + len("proc__=_")
   of nkDo: result = lsons(n) + len("do__:_")
@@ -1050,7 +1051,6 @@ proc gsub(g: var TSrcGen, n: PNode, c: TContext) =
   of nkWhileStmt: gwhile(g, n)
   of nkPragmaBlock: gpragmaBlock(g, n)
   of nkCaseStmt, nkRecCase: gcase(g, n)
-  of nkMacroStmt: gmacro(g, n)
   of nkTryStmt: gtry(g, n)
   of nkForStmt, nkParForStmt: gfor(g, n)
   of nkBlockStmt, nkBlockExpr: gblock(g, n)
@@ -1114,7 +1114,8 @@ proc gsub(g: var TSrcGen, n: PNode, c: TContext) =
     putWithSpace(g, tkContinue, "continue")
     gsub(g, n.sons[0])
   of nkPragma: 
-    if not (renderNoPragmas in g.flags): 
+    if renderNoPragmas notin g.flags:
+      put(g, tkSpaces, Space)
       put(g, tkCurlyDotLe, "{.")
       gcomma(g, n, emptyContext)
       put(g, tkCurlyDotRi, ".}")
@@ -1151,6 +1152,9 @@ proc gsub(g: var TSrcGen, n: PNode, c: TContext) =
     gstmts(g, lastSon(n), c)
   of nkBindStmt: 
     putWithSpace(g, tkBind, "bind")
+    gcomma(g, n, c)
+  of nkMixinStmt:
+    putWithSpace(g, tkMixin, "mixin")
     gcomma(g, n, c)
   of nkElifBranch: 
     optNL(g)

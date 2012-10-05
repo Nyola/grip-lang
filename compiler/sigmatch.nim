@@ -11,7 +11,7 @@
 ## the call to overloaded procs, generic procs and operators.
 
 import 
-  intsets, ast, astalgo, semdata, types, msgs, renderer, lookups, semtypinst, 
+  intsets, ast, astalgo, semdata, types, msgs, renderer, lookups, semtypinst,
   magicsys, condsyms, idents, lexer, options
 
 type
@@ -257,32 +257,6 @@ proc tupleRel(c: var TCandidate, f, a: PType): TTypeRelation =
           var y = a.n.sons[i].sym
           if x.name.id != y.name.id: return isNone
 
-proc matchTypeClass(c: var TCandidate, f, a: PType): TTypeRelation =
-  for i in countup(0, f.sonsLen - 1):
-    let son = f.sons[i]
-    var match = son.kind == skipTypes(a, {tyRange, tyGenericInst}).kind
-
-    if not match:
-      case son.kind
-      of tyGenericBody:
-        if a.kind == tyGenericInst and a.sons[0] == son:
-          match = true
-          put(c.bindings, f, a)
-      of tyTypeClass:
-        match = matchTypeClass(c, son, a) == isGeneric
-      else: nil
-
-    if tfAny in f.flags:
-      if match:
-        return isGeneric
-    else:
-      if not match:
-        return isNone
-
-  # if the loop finished without returning, either all constraints matched
-  # or none of them matched.
-  result = if tfAny in f.flags: isNone else: isGeneric
-  
 proc procTypeRel(c: var TCandidate, f, a: PType): TTypeRelation =
   proc inconsistentVarTypes(f, a: PType): bool {.inline.} =
     result = f.kind != a.kind and (f.kind == tyVar or a.kind == tyVar)
@@ -324,6 +298,10 @@ proc procTypeRel(c: var TCandidate, f, a: PType): TTypeRelation =
       else:
         result = isNone
   else: nil
+
+proc matchTypeClass(c: var TCandidate, f, a: PType): TTypeRelation =
+  result = if matchTypeClass(c.bindings, f, a): isGeneric
+           else: isNone
 
 proc typeRel(c: var TCandidate, f, a: PType): TTypeRelation = 
   # is a subtype of f?
@@ -370,23 +348,22 @@ proc typeRel(c: var TCandidate, f, a: PType): TTypeRelation =
   of tyVar: 
     if a.kind == f.kind: result = typeRel(c, base(f), base(a))
     else: result = typeRel(c, base(f), a)
-  of tyArray, tyArrayConstr: 
+  of tyArray, tyArrayConstr:
     # tyArrayConstr cannot happen really, but
     # we wanna be safe here
     case a.kind
-    of tyArray: 
-      result = minRel(typeRel(c, f.sons[0], a.sons[0]), 
-                      typeRel(c, f.sons[1], a.sons[1]))
-      if result < isGeneric: result = isNone
-    of tyArrayConstr: 
+    of tyArray, tyArrayConstr:
+      var fRange = f.sons[0]
+      if fRange.kind == tyGenericParam:
+        var prev = PType(idTableGet(c.bindings, fRange))
+        if prev == nil:
+          put(c.bindings, fRange, a.sons[0])
+          fRange = a
+        else:
+          fRange = prev
       result = typeRel(c, f.sons[1], a.sons[1])
-      if result < isGeneric: 
-        result = isNone
-      else: 
-        if (result != isGeneric) and (lengthOrd(f) != lengthOrd(a)): 
-          result = isNone
-        elif f.sons[0].kind in GenericTypes: 
-          result = minRel(result, typeRel(c, f.sons[0], a.sons[0]))
+      if result < isGeneric: result = isNone
+      elif lengthOrd(fRange) != lengthOrd(a): result = isNone
     else: nil
   of tyOpenArray, tyVarargs:
     case a.Kind
@@ -660,7 +637,12 @@ proc ParamTypesMatchAux(c: PContext, m: var TCandidate, f, a: PType,
   of isGeneric:
     inc(m.genericMatches)
     if m.calleeSym != nil and m.calleeSym.kind in {skMacro, skTemplate}:
-      result = argOrig
+      if f.kind == tyStmt and argOrig.kind == nkDo:
+        result = argOrig[bodyPos]
+      elif f.kind == tyTypeDesc:
+        result = arg
+      else:
+        result = argOrig
     else:
       result = copyTree(arg)
       result.typ = getInstantiatedType(c, arg, m, f) 

@@ -388,7 +388,8 @@ proc getSockName*(socket: TSocket): TPort =
 
 proc selectWrite*(writefds: var seq[TSocket], timeout = 500): int
 
-template acceptAddrPlain(noClientRet, successRet: expr, sslImplementation: stmt): stmt =
+template acceptAddrPlain(noClientRet, successRet: expr, 
+                         sslImplementation: stmt): stmt {.immediate.} =
   assert(client != nil)
   var sockAddress: Tsockaddr_in
   var addrLen = sizeof(sockAddress).TSockLen
@@ -532,7 +533,7 @@ proc accept*(server: TSocket, client: var TSocket) =
 proc acceptAddr*(server: TSocket): tuple[client: TSocket, address: string] {.deprecated.} =
   ## Slightly different version of ``acceptAddr``.
   ##
-  ## **Warning**: This function is now deprecated, you shouldn't use it!
+  ## **Deprecated since version 0.9.0:** Please use the function above.
   var client: TSocket
   new(client)
   var address = ""
@@ -540,7 +541,7 @@ proc acceptAddr*(server: TSocket): tuple[client: TSocket, address: string] {.dep
   return (client, address)
 
 proc accept*(server: TSocket): TSocket {.deprecated.} =
-  ## **Warning**: This function is now deprecated, you shouldn't use it!
+  ## **Deprecated since version 0.9.0:** Please use the function above.
   new(result)
   var address = ""
   acceptAddr(server, result, address)
@@ -939,7 +940,7 @@ proc readIntoBuf(socket: TSocket, flags: int32): int =
   socket.currPos = 0
 
 template retRead(flags, readBytes: int) =
-  let res = socket.readIntoBuf(flags)
+  let res = socket.readIntoBuf(flags.int32)
   if res <= 0:
     if readBytes > 0:
       return readBytes
@@ -1226,8 +1227,9 @@ proc recvFrom*(socket: TSocket, data: var string, length: int,
   var addrLen = sizeof(sockAddress).TSockLen
   result = recvFrom(socket.fd, cstring(data), length.cint, flags.cint,
                     cast[ptr TSockAddr](addr(sockAddress)), addr(addrLen))
-  
+
   if result != -1:
+    data.setLen(result)
     address = $inet_ntoa(sockAddress.sin_addr)
     port = ntohs(sockAddress.sin_port).TPort
 

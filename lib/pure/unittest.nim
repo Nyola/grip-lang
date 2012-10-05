@@ -7,7 +7,7 @@
 #    distribution, for details about the copyright.
 #
 
-## :Author: Zahary Karadjov (zah@github)
+## :Author: Zahary Karadjov
 ##
 ## This module implements the standard unit testing facilities such as
 ## suites, fixtures and test cases as well as facilities for combinatorial 
@@ -31,19 +31,19 @@ var
   
   checkpoints: seq[string] = @[]
 
-template TestSetupIMPL*: stmt {.dirty.} = nil
-template TestTeardownIMPL*: stmt {.dirty.} = nil
+template TestSetupIMPL*: stmt {.immediate, dirty.} = nil
+template TestTeardownIMPL*: stmt {.immediate, dirty.} = nil
 
 proc shouldRun(testName: string): bool =
   result = true
 
-template suite*(name: expr, body: stmt): stmt {.dirty.} =
+template suite*(name: expr, body: stmt): stmt {.immediate, dirty.} =
   block:
-    template setup*(setupBody: stmt): stmt {.dirty.} =
-      template TestSetupIMPL: stmt {.dirty.} = setupBody
+    template setup*(setupBody: stmt): stmt {.immediate, dirty.} =
+      template TestSetupIMPL: stmt {.immediate, dirty.} = setupBody
 
-    template teardown*(teardownBody: stmt): stmt {.dirty.} =
-      template TestTeardownIMPL: stmt {.dirty.} = teardownBody
+    template teardown*(teardownBody: stmt): stmt {.immediate, dirty.} =
+      template TestTeardownIMPL: stmt {.immediate, dirty.} = teardownBody
 
     body
 
@@ -59,7 +59,7 @@ proc testDone(name: string, s: TTestStatus) =
     else:
       echo "[", $s, "] ", name, "\n"
   
-template test*(name: expr, body: stmt): stmt {.dirty.} =
+template test*(name: expr, body: stmt): stmt {.immediate, dirty.} =
   bind shouldRun, checkpoints, testDone
 
   if shouldRun(name):
@@ -92,68 +92,66 @@ template fail* =
   TestStatusIMPL = FAILED
   checkpoints = @[]
 
-macro check*(conditions: stmt): stmt =
-  let conditions = callsite()
+macro check*(conditions: stmt): stmt {.immediate.} =
+  let checked = callsite()[1]
   
-  proc standardRewrite(e: PNimrodNode): PNimrodNode =
+  var
+    argsAsgns = newNimNode(nnkStmtList)
+    argsPrintOuts = newNimNode(nnkStmtList)
+    counter = 0
+
+  template asgn(a, value: expr): stmt =
+    let a = value
+  
+  template print(name, value: expr): stmt =
+    when compiles(string($value)):
+      checkpoint(name & " was " & $value)
+
+  proc inspectArgs(exp: PNimrodNode) =
+    for i in 1 .. <exp.len:
+      if exp[i].kind notin nnkLiterals:
+        inc counter
+        var arg = newIdentNode(":p" & ($counter))
+        var argStr = exp[i].toStrLit
+        if exp[i].kind in nnkCallKinds: inspectArgs(exp[i])
+        argsAsgns.add getAst(asgn(arg, exp[i]))
+        argsPrintOuts.add getAst(print(argStr, arg))
+        exp[i] = arg
+
+  case checked.kind
+  of nnkCallKinds:
+    template rewrite(call, lineInfoLit: expr, callLit: string,
+                     argAssgs, argPrintOuts: stmt): stmt =
+      block:
+        argAssgs
+        if not call:
+          checkpoint(lineInfoLit & ": Check failed: " & callLit)
+          argPrintOuts
+          fail()
+      
+    var checkedStr = checked.toStrLit
+    inspectArgs(checked)
+    result = getAst(rewrite(checked, checked.lineinfo, checkedStr, argsAsgns, argsPrintOuts))
+
+  of nnkStmtList:
+    result = newNimNode(nnkStmtList)
+    for i in countup(0, checked.len - 1):
+      result.add(newCall(!"check", checked[i]))
+
+  else:
     template rewrite(Exp, lineInfoLit: expr, expLit: string): stmt =
       if not Exp:
         checkpoint(lineInfoLit & ": Check failed: " & expLit)
         fail()
- 
-    result = getAst(rewrite(e, e.lineinfo, e.toStrLit))
-  
-  case conditions.kind
-  of nnkCall, nnkCommand, nnkMacroStmt:
-    case conditions[1].kind
-    of nnkInfix:
-      proc rewriteBinaryOp(op: PNimrodNode): PNimrodNode =
-        template rewrite(op, left, right, lineInfoLit: expr, opLit,
-          leftLit, rightLit: string, printLhs, printRhs: bool): stmt =
-          block:
-            var 
-              lhs = left
-              rhs = right
 
-            if not `op`(lhs, rhs):
-              checkpoint(lineInfoLit & ": Check failed: " & opLit)
-              when printLhs: checkpoint("  " & leftLit & " was " & $lhs)
-              when printRhs: checkpoint("  " & rightLit & " was " & $rhs)
-              fail()
+    result = getAst(rewrite(checked, checked.lineinfo, checked.toStrLit))
 
-        result = getAst(rewrite(
-          op[0], op[1], op[2],
-          op.lineinfo,
-          op.toStrLit,
-          op[1].toStrLit,
-          op[2].toStrLit,
-          op[1].kind notin nnkLiterals,
-          op[2].kind notin nnkLiterals))
-        
-      result = rewriteBinaryOp(conditions[1])
-  
-    of nnkCall, nnkCommand:
-      # TODO: We can print out the call arguments in case of failure
-      result = standardRewrite(conditions[1])
-
-    of nnkStmtList:
-      result = newNimNode(nnkStmtList)
-      for i in countup(0, conditions[1].len - 1):
-        result.add(newCall(!"check", conditions[1][i]))
-
-    else:
-      result = standardRewrite(conditions[1])
-
-  else:
-    var ast = conditions.treeRepr
-    error conditions.lineinfo & ": Malformed check statement:\n" & ast
-
-template require*(conditions: stmt): stmt {.dirty.} =
+template require*(conditions: stmt): stmt {.immediate, dirty.} =
   block:
     const AbortOnError {.inject.} = true
     check conditions
 
-macro expect*(exp: stmt): stmt =
+macro expect*(exceptions: varargs[expr], body: stmt): stmt {.immediate.} =
   let exp = callsite()
   template expectBody(errorTypes, lineInfoLit: expr,
                       body: stmt): PNimrodNode {.dirty.} =
@@ -164,12 +162,11 @@ macro expect*(exp: stmt): stmt =
     except errorTypes:
       nil
 
-  var expectCall = exp[0]
-  var body = exp[1]
-  
+  var body = exp[exp.len - 1]
+
   var errorTypes = newNimNode(nnkBracket)
-  for i in countup(1, expectCall.len - 1):
-    errorTypes.add(expectCall[i])
+  for i in countup(1, exp.len - 2):
+    errorTypes.add(exp[i])
 
   result = getAst(expectBody(errorTypes, exp.lineinfo, body))
 

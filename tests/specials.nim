@@ -124,7 +124,6 @@ proc runGcTests(r: var TResults, options: string) =
   test "gcleak"
   test "gcleak2"
   test "gctest"
-  # disabled for now as it somehow runs very slowly ('delete' bug?) but works:
   test "gcleak3"
   test "weakrefs"
 
@@ -137,6 +136,7 @@ proc runThreadTests(r: var TResults, options: string) =
     runSingleTest(r, "tests/threads" / filename, options & " --tlsEmulation:on")
   
   test "tactors"
+  test "tactors2"
   test "threadex"
   # deactivated because output capturing still causes problems sometimes:
   #test "trecursive_actor"
@@ -188,6 +188,9 @@ proc runSpecialTests(r: var TResults, options: string) =
   runThreadTests(r, options & " --threads:on")
   runIOTests(r, options)
 
+  for t in os.walkFiles("tests/patterns/t*.nim"):
+    runSingleTest(r, t, options)
+
 proc rejectSpecialTests(r: var TResults, options: string) =
   rejectThreadTests(r, options)
 
@@ -199,4 +202,8 @@ proc compileSpecialTests(r: var TResults, options: string) =
 
   compileDLLTests(r, options)
   compileDebuggerTests(r, options)
+
+  #var given = callCompiler("nimrod i", "nimrod i", options)
+  #r.addResult("nimrod i", given.msg, if given.err: reFailure else: reSuccess)
+  #if not given.err: inc(r.passed)
 

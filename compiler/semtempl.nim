@@ -90,6 +90,29 @@ proc semBindStmt(c: PContext, n: PNode, toBind: var TIntSet): PNode =
     else:
       illFormedAst(a)
   result = newNodeI(nkNilLit, n.info)
+
+when false:
+  # not active before 0.9.0 is out
+  proc semMixinStmt(c: PContext, n: PNode, toMixin: var TIntSet): PNode =
+    for i in 0 .. < n.len:
+      var a = n.sons[i]
+      # If 'a' is an overloaded symbol, we used to use the first symbol
+      # as a 'witness' and use the fact that subsequent lookups will yield
+      # the same symbol!
+      # This is however not true anymore for hygienic templates as semantic
+      # processing for them changes the symbol table...
+      let s = QualifiedLookUp(c, a)
+      if s != nil:
+        # we need to mark all symbols:
+        let sc = symChoice(c, n, s, scForceOpen)
+        if sc.kind == nkSym:
+          toMixin.incl(sc.sym.id)
+        else:
+          for x in items(sc): toMixin.incl(x.sym.id)
+      else:
+        # do nothing: identifiers are already not bound:
+        nil
+    result = newNodeI(nkNilLit, n.info)
   
 proc replaceIdentBySym(n: var PNode, s: PNode) =
   case n.kind
@@ -392,8 +415,6 @@ proc semTemplateDef(c: PContext, n: PNode): PNode =
     addSon(s.typ.n, newNodeIT(nkType, n.info, s.typ.sons[0]))
   if n.sons[patternPos].kind != nkEmpty:
     n.sons[patternPos] = semPattern(c, n.sons[patternPos])
-    c.patterns.add(s)
-
   var ctx: TemplCtx
   ctx.toBind = initIntSet()
   ctx.c = c
@@ -417,30 +438,41 @@ proc semTemplateDef(c: PContext, n: PNode): PNode =
     addInterfaceOverloadableSymAt(c, s, curScope)
   else:
     SymTabReplace(c.tab.stack[curScope], proto, s)
+  if n.sons[patternPos].kind != nkEmpty:
+    c.patterns.add(s)
 
 proc semPatternBody(c: var TemplCtx, n: PNode): PNode =
   template templToExpand(s: expr): expr =
     s.kind == skTemplate and (s.typ.len == 1 or sfImmediate in s.flags)
   
+  proc newParam(c: var TemplCtx, n: PNode, s: PSym): PNode =
+    # the param added in the current scope is actually wrong here for
+    # macros because they have a shadowed param of type 'PNimNode' (see
+    # semtypes.addParamOrResult). Within the pattern we have to ensure
+    # to use the param with the proper type though:
+    incl(s.flags, sfUsed)
+    let x = c.owner.typ.n.sons[s.position+1].sym
+    assert x.name == s.name
+    result = newSymNode(x, n.info)
+  
   proc handleSym(c: var TemplCtx, n: PNode, s: PSym): PNode =
+    result = n
     if s != nil:
       if s.owner == c.owner and s.kind == skParam:
-        incl(s.flags, sfUsed)
-        result = newSymNode(s, n.info)
+        result = newParam(c, n, s)
       elif Contains(c.toBind, s.id):
         result = symChoice(c.c, n, s, scClosed)
       elif templToExpand(s):
         result = semPatternBody(c, semTemplateExpr(c.c, n, s, false))
       else:
-        result = symChoice(c.c, n, s, scOpen)
-    else:
-      result = n
+        nil
+        # we keep the ident unbound for matching instantiated symbols and
+        # more flexibility
   
   proc expectParam(c: var TemplCtx, n: PNode): PNode =
     let s = QualifiedLookUp(c.c, n, {})
     if s != nil and s.owner == c.owner and s.kind == skParam:
-      incl(s.flags, sfUsed)
-      result = newSymNode(s, n.info)
+      result = newParam(c, n, s)
     else:
       localError(n.info, errInvalidExpression)
       result = n
@@ -454,12 +486,22 @@ proc semPatternBody(c: var TemplCtx, n: PNode): PNode =
     result = semBindStmt(c.c, n, c.toBind)
   of nkEmpty, nkSym..nkNilLit: nil
   of nkCurlyExpr:
-    # we support '(pattern){x}' to bind a subpattern to a parameter 'x':
-    if n.len != 2 or n.sons[1].kind != nkIdent:
+    # we support '(pattern){x}' to bind a subpattern to a parameter 'x'; 
+    # '(pattern){|x}' does the same but the matches will be gathered in 'x'
+    if n.len != 2:
       localError(n.info, errInvalidExpression)
-    else:
+    elif n.sons[1].kind == nkIdent:
       n.sons[0] = semPatternBody(c, n.sons[0])
       n.sons[1] = expectParam(c, n.sons[1])
+    elif n.sons[1].kind == nkPrefix and n.sons[1].sons[0].kind == nkIdent:
+      let opr = n.sons[1].sons[0]
+      if opr.ident.s == "|":
+        n.sons[0] = semPatternBody(c, n.sons[0])
+        n.sons[1].sons[1] = expectParam(c, n.sons[1].sons[1])
+      else:
+        localError(n.info, errInvalidExpression)
+    else:
+      localError(n.info, errInvalidExpression)
   of nkCallKinds:
     let s = QualifiedLookUp(c.c, n.sons[0], {})
     if s != nil:
@@ -472,7 +514,7 @@ proc semPatternBody(c: var TemplCtx, n: PNode): PNode =
       # we interpret `*` and `|` only as pattern operators if they occur in
       # infix notation, so that '`*`(a, b)' can be used for verbatim matching:
       let opr = n.sons[0]
-      if opr.ident.s == "*":
+      if opr.ident.s == "*" or opr.ident.s == "**":
         result = newNodeI(nkPattern, n.info, n.len)
         result.sons[0] = opr
         result.sons[1] = semPatternBody(c, n.sons[1])
@@ -504,7 +546,8 @@ proc semPatternBody(c: var TemplCtx, n: PNode): PNode =
       if s != nil:
         if Contains(c.toBind, s.id):
           return symChoice(c.c, n, s, scClosed)
-        return symChoice(c.c, n, s, scOpen)
+        else:
+          return newIdentNode(s.name, n.info)
     of nkPar:
       if n.len == 1: return semPatternBody(c, n.sons[0])
     else: nil

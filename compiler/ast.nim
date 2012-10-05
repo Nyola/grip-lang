@@ -146,7 +146,6 @@ type
     nkElifBranch,         # used in if statements
     nkExceptBranch,       # an except section
     nkElse,               # an else part
-    nkMacroStmt,          # a macro statement
     nkAsmStmt,            # an assembler block
     nkPragma,             # a pragma statement
     nkPragmaBlock,        # a pragma with a block
@@ -177,6 +176,7 @@ type
     nkFromStmt,           # a from * import statement
     nkIncludeStmt,        # an include statement
     nkBindStmt,           # a bind statement
+    nkMixinStmt,          # a mixin statement
     nkCommentStmt,        # a comment statement
     nkStmtListExpr,       # a statement list followed by an expr; this is used
                           # to allow powerful multi-line templates
@@ -344,6 +344,14 @@ type
     tfFromGeneric,    # type is an instantiation of a generic; this is needed
                       # because for instantiations of objects, structural
                       # type equality has to be used
+    tfInstantiated    # XXX: used to mark generic params after instantiation.
+                      # if the concrete type happens to be an implicit generic
+                      # this can lead to invalid proc signatures in the second
+                      # pass of semProcTypeNode performed after instantiation.
+                      # this won't be needed if we don't perform this redundant
+                      # second pass (stay tuned).
+    tfRetType         # marks return types in proc (used to detect type classes 
+                      # used as return types for return type inference)
     tfAll,            # type class requires all constraints to be met (default)
     tfAny,            # type class requires any constraint to be met
     tfCapturesEnv,    # whether proc really captures some environment
@@ -776,6 +784,11 @@ proc add*(father, son: PNode) =
 proc `[]`*(n: PNode, i: int): PNode {.inline.} =
   result = n.sons[i]
 
+# son access operators with support for negative indices
+template `{}`*(n: PNode, i: int): expr = n[i -| n]
+template `{}=`*(n: PNode, i: int, s: PNode): stmt =
+  n.sons[i -| n] = s
+  
 var emptyNode* = newNode(nkEmpty)
 # There is a single empty node that is shared! Do not overwrite it!
 
@@ -900,6 +913,18 @@ proc newNodeIT(kind: TNodeKind, info: TLineInfo, typ: PType): PNode =
 proc newMetaNodeIT*(tree: PNode, info: TLineInfo, typ: PType): PNode =
   result = newNodeIT(nkMetaNode, info, typ)
   result.add(tree)
+
+var emptyParams = newNode(nkFormalParams)
+emptyParams.addSon(emptyNode)
+
+proc newProcNode*(kind: TNodeKind, info: TLineInfo, body: PNode,
+                 params = emptyParams,
+                 name, pattern, genericParams,
+                 pragmas, exceptions = ast.emptyNode): PNode =
+  result = newNodeI(kind, info)
+  result.sons = @[name, pattern, genericParams, params,
+                  pragmas, exceptions, body]
+
 
 proc NewType(kind: TTypeKind, owner: PSym): PType = 
   new(result)
@@ -1201,3 +1226,7 @@ iterator items*(n: PNode): PNode =
 
 proc isAtom*(n: PNode): bool {.inline.} =
   result = n.kind >= nkNone and n.kind <= nkNilLit
+
+proc isEmptyType*(t: PType): bool {.inline.} =
+  ## 'void' and 'stmt' types are often equivalent to 'nil' these days:
+  result = t == nil or t.kind in {tyEmpty, tyStmt}

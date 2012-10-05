@@ -25,14 +25,20 @@ proc instantiateGenericParamList(c: PContext, n: PNode, pt: TIdTable,
     s.flags = s.flags + {sfUsed, sfFromGeneric}
     var t = PType(IdTableGet(pt, q.typ))
     if t == nil:
-      LocalError(a.info, errCannotInstantiateX, s.name.s)
-      t = errorType(c)
+      if tfRetType in q.typ.flags:
+        # keep the generic type and allow the return type to be bound 
+        # later by semAsgn in return type inference scenario
+        t = q.typ
+      else:
+        LocalError(a.info, errCannotInstantiateX, s.name.s)
+        t = errorType(c)
     elif t.kind == tyGenericParam: 
       InternalError(a.info, "instantiateGenericParamList: " & q.name.s)
     elif t.kind == tyGenericInvokation:
       #t = instGenericContainer(c, a, t)
       t = generateTypeInstance(c, pt, a, t)
       #t = ReplaceTypeVarsT(cl, t)
+    t.flags.incl tfInstantiated
     s.typ = t
     addDecl(c, s)
     entry.concreteTypes[i] = t
@@ -41,7 +47,8 @@ proc sameInstantiation(a, b: TInstantiatedSymbol): bool =
   if a.genericSym.id == b.genericSym.id and 
       a.concreteTypes.len == b.concreteTypes.len:
     for i in 0 .. < a.concreteTypes.len:
-      if not sameType(a.concreteTypes[i], b.concreteTypes[i]): return
+      if not compareTypes(a.concreteTypes[i], b.concreteTypes[i],
+                          flags = {TypeDescExactMatch}): return
     result = true
 
 proc GenericCacheGet(c: PContext, entry: var TInstantiatedSymbol): PSym = 
@@ -69,15 +76,32 @@ proc removeDefaultParamValues(n: PNode) =
         # not possible... XXX We don't solve this issue here.
         a.sons[L-1] = ast.emptyNode
 
+proc freshGenSyms(n: PNode, owner: PSym, symMap: var TIdTable) =
+  # we need to create a fresh set of gensym'ed symbols:
+  if n.kind == nkSym and sfGenSym in n.sym.flags:
+    var x = PSym(IdTableGet(symMap, n.sym))
+    if x == nil:
+      x = copySym(n.sym, false)
+      x.owner = owner
+      IdTablePut(symMap, n.sym, x)
+    n.sym = x
+  else:
+    for i in 0 .. <safeLen(n): freshGenSyms(n.sons[i], owner, symMap)
+
 proc instantiateBody(c: PContext, n: PNode, result: PSym) =
   if n.sons[bodyPos].kind != nkEmpty:
     # add it here, so that recursive generic procs are possible:
     addDecl(c, result)
     pushProcCon(c, result)
-    if result.kind in {skProc, skMethod, skConverter}: 
+    if result.kind in {skProc, skMethod, skConverter, skMacro}: 
       addResult(c, result.typ.sons[0], n.info, result.kind)
       addResultNode(c, n)
-    var b = semStmtScope(c, n.sons[bodyPos])
+    var b = n.sons[bodyPos]
+    var symMap: TIdTable
+    InitIdTable symMap
+    freshGenSyms(b, result, symMap)
+    b = semProcBody(c, b)
+    b = hloBody(c, b)
     n.sons[bodyPos] = transformBody(c.module, b, result)
     #echo "code instantiated ", result.name.s
     excl(result.flags, sfForward)
@@ -104,33 +128,6 @@ proc sideEffectsCheck(c: PContext, s: PSym) =
   elif sfThread in s.flags and semthreads.needsGlobalAnalysis() and 
       s.ast.sons[genericParamsPos].kind == nkEmpty:
     c.threadEntries.add(s)
-
-proc applyConcreteTypesToSig(genericProc: PSym, concTypes: seq[PType]): PType =
-  # XXX: This is intended to replace the use of semParamList in generateInstance.
-  # The results of semParamList's analysis are already encoded in the original
-  # proc type and any concrete types may be aplied directly over it.
-  # Besides being more efficient, it will remove the awkward case of
-  # genericParams == nil in semParamList.
-  # Currenly, it fails in some cases such as:
-  # proc inc2*[T](x: var ordinal[T], y = 1) {.magic: "Inc", noSideEffect.}
-  let sig = genericProc.typ
-  result = copyType(sig, getCurrOwner(), false)
-  result.n = sig.n.shallowCopy
-  
-  for i in countup(0, sig.len - 1):
-    let tOrig = sig.sons[i]
-    if tOrig == nil: continue        
-    let oGenParams = genericProc.ast.sons[genericParamsPos]
-    if skipTypes(tOrig, skipPtrs).kind in {tyGenericParam}:
-      var tConcrete = concTypes[tOrig.sym.position]
-      if i > 0:
-        let param = sig.n.sons[i].sym.copySym
-        param.typ = tConcrete
-        result.n.sons[i] = newSymNode(param)
-      result.sons[i] = tConcrete
-    else:
-      result.sons[i] = tOrig
-      if i > 0: result.n.sons[i] = sig.n.sons[i]
 
 proc generateInstance(c: PContext, fn: PSym, pt: TIdTable, 
                       info: TLineInfo): PSym =
@@ -165,17 +162,12 @@ proc generateInstance(c: PContext, fn: PSym, pt: TIdTable,
   n.sons[genericParamsPos] = ast.emptyNode
   # semantic checking for the parameters:
   if n.sons[paramsPos].kind != nkEmpty:
-    if false and nimdbg:
-      result.typ = applyConcreteTypesToSig(fn, entry.concreteTypes)
-      addParams(c, result.typ.n, fn.kind)
-    else:
-      removeDefaultParamValues(n.sons[ParamsPos])
-      semParamList(c, n.sons[ParamsPos], nil, result)
+    removeDefaultParamValues(n.sons[ParamsPos])
+    semParamList(c, n.sons[ParamsPos], nil, result)
   else:
     result.typ = newTypeS(tyProc, c)
     rawAddSon(result.typ, nil)
   result.typ.callConv = fn.typ.callConv
-  ParamsTypeCheck(c, result.typ)
   var oldPrc = GenericCacheGet(c, entry)
   if oldPrc == nil:
     c.generics.generics.add(entry)
@@ -183,8 +175,10 @@ proc generateInstance(c: PContext, fn: PSym, pt: TIdTable,
       pragma(c, result, n.sons[pragmasPos], allRoutinePragmas)
     if isNil(n.sons[bodyPos]):
       n.sons[bodyPos] = copyTree(fn.getBody)
-    instantiateBody(c, n, result)
-    sideEffectsCheck(c, result)
+    if fn.kind != skTemplate:
+      instantiateBody(c, n, result)
+      sideEffectsCheck(c, result)
+    ParamsTypeCheck(c, result.typ)
   else:
     result = oldPrc
   popInfoContext()

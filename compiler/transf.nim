@@ -140,6 +140,7 @@ proc transformVarSection(c: PTransf, v: PNode): PTransNode =
       result[i] = PTransNode(it)
     elif it.kind == nkIdentDefs: 
       if it.sons[0].kind != nkSym: InternalError(it.info, "transformVarSection")
+      InternalAssert(it.len == 3)
       var newVar = copySym(it.sons[0].sym)
       incl(newVar.flags, sfFromGeneric)
       # fixes a strange bug for rodgen:
@@ -184,16 +185,6 @@ proc transformConstSection(c: PTransf, v: PNode): PTransNode =
         result[i] = PTransNode(b)
       else:
         result[i] = PTransNode(it)
-
-proc trivialBody(s: PSym): PNode =
-  # a routine's body is trivially inlinable if marked as 'inline' and its
-  # body consists of only 1 statement. It is important that we perform this
-  # optimization here as 'distinct strings' may cause string copying otherwise:
-  # proc xml(s: string): TXmlString = return xmlstring(s)
-  # We have to generate a ``nkLineTracking`` node though to not lose
-  # debug information:
-  # XXX to implement
-  nil
 
 proc hasContinue(n: PNode): bool = 
   case n.kind
@@ -508,9 +499,13 @@ proc transformCase(c: PTransf, n: PNode): PTransNode =
     add(result, elseBranch)
   
 proc transformArrayAccess(c: PTransf, n: PNode): PTransNode = 
-  result = newTransNode(n)
-  result[0] = transform(c, skipConv(n.sons[0]))
-  result[1] = transform(c, skipConv(n.sons[1]))
+  # XXX this is really bad; transf should use a proper AST visitor
+  if n.sons[0].kind == nkSym and n.sons[0].sym.kind == skType:
+    result = n.ptransnode
+  else:
+    result = newTransNode(n)
+    for i in 0 .. < n.len:
+      result[i] = transform(c, skipConv(n.sons[i]))
   
 proc getMergeOp(n: PNode): PSym = 
   case n.kind
@@ -627,11 +622,14 @@ proc transform(c: PTransf, n: PNode): PTransNode =
     result = transformAddrDeref(c, n, nkAddr, nkHiddenAddr)
   of nkHiddenStdConv, nkHiddenSubConv, nkConv: 
     result = transformConv(c, n)
-  of nkDiscardStmt: 
-    result = transformSons(c, n)
-    if isConstExpr(PNode(result).sons[0]): 
-      # ensure that e.g. discard "some comment" gets optimized away completely:
-      result = PTransNode(newNode(nkCommentStmt))
+  of nkDiscardStmt:
+    result = PTransNode(n)
+    if n.sons[0].kind != nkEmpty:
+      result = transformSons(c, n)
+      if isConstExpr(PNode(result).sons[0]):
+        # ensure that e.g. discard "some comment" gets optimized away
+        # completely:
+        result = PTransNode(newNode(nkCommentStmt))
   of nkCommentStmt, nkTemplateDef: 
     return n.ptransNode
   of nkConstSection:

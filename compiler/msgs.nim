@@ -8,7 +8,7 @@
 #
 
 import
-  options, strutils, os, tables
+  options, strutils, os, tables, sockets
 
 type 
   TMsgKind* = enum
@@ -105,7 +105,7 @@ type
     warnDeprecated, warnConfigDeprecated,
     warnSmallLshouldNotBeUsed, warnUnknownMagic, warnRedefinitionOfLabel, 
     warnUnknownSubstitutionX, warnLanguageXNotSupported, warnCommentXIgnored, 
-    warnXisPassedToProcVar, warnAnalysisLoophole,
+    warnNilStatement, warnAnalysisLoophole,
     warnDifferentHeaps, warnWriteToForeignHeap, warnImplicitClosure,
     warnEachIdentIsTuple, warnUser,
     hintSuccess, hintSuccessX, 
@@ -234,7 +234,7 @@ const
     errOrdXMustNotBeNegative: "ord($1) must not be negative", 
     errLenXinvalid: "len($1) must be less than 32768",
     errWrongNumberOfVariables: "wrong number of variables", 
-    errExprCannotBeRaised: "only objects can be raised", 
+    errExprCannotBeRaised: "only a 'ref object' can be raised", 
     errBreakOnlyInLoop: "'break' only allowed in loop construct", 
     errTypeXhasUnknownSize: "type \'$1\' has unknown size", 
     errConstNeedsConstExpr: "a constant can only be initialized with a constant expression", 
@@ -353,7 +353,7 @@ const
     warnUnknownSubstitutionX: "unknown substitution \'$1\' [UnknownSubstitutionX]", 
     warnLanguageXNotSupported: "language \'$1\' not supported [LanguageXNotSupported]", 
     warnCommentXIgnored: "comment \'$1\' ignored [CommentXIgnored]", 
-    warnXisPassedToProcVar: "\'$1\' is passed to a procvar; deprecated [XisPassedToProcVar]", 
+    warnNilStatement: "'nil' statement is deprecated; use an empty 'discard' statement instead [NilStmt]", 
     warnAnalysisLoophole: "thread analysis incomplete due to unknown call '$1' [AnalysisLoophole]",
     warnDifferentHeaps: "possible inconsistency of thread local heaps [DifferentHeaps]",
     warnWriteToForeignHeap: "write to foreign heap [WriteToForeignHeap]",
@@ -383,7 +383,7 @@ const
     "Deprecated", "ConfigDeprecated",
     "SmallLshouldNotBeUsed", "UnknownMagic", 
     "RedefinitionOfLabel", "UnknownSubstitutionX", "LanguageXNotSupported", 
-    "CommentXIgnored", "XisPassedToProcVar",
+    "CommentXIgnored", "NilStmt",
     "AnalysisLoophole", "DifferentHeaps", "WriteToForeignHeap",
     "ImplicitClosure", "EachIdentIsTuple", "User"]
 
@@ -485,6 +485,16 @@ var
   gWarnCounter*: int = 0
   gErrorMax*: int = 1         # stop after gErrorMax errors
   gSilence*: int              # == 0 if we produce any output at all 
+  stdoutSocket*: TSocket
+
+proc SuggestWriteln*(s: string) = 
+  if gSilence == 0: 
+    if isNil(stdoutSocket): Writeln(stdout, s)
+    else: stdoutSocket.send(s & "\c\L")
+    
+proc SuggestQuit*() =
+  if isNil(stdoutSocket): quit(0)
+  else: stdoutSocket.send("\c\L")
   
 # this format is understood by many text editors: it is the same that
 # Borland and Freepascal use
@@ -594,22 +604,25 @@ proc inCheckpoint*(current: TLineInfo): TCheckPointResult =
 type
   TErrorHandling = enum doNothing, doAbort, doRaise
 
-proc handleError(msg: TMsgKind, eh: TErrorHandling, s: string) = 
-  if msg == errInternal: 
-    assert(false)             # we want a stack trace here
+proc handleError(msg: TMsgKind, eh: TErrorHandling, s: string) =
+  template maybeTrace =
+    if defined(debug) or gVerbosity >= 3:
+      writeStackTrace()
+
+  if msg == errInternal:
+    writeStackTrace() # we always want a stack trace here
   if msg >= fatalMin and msg <= fatalMax: 
-    if gVerbosity >= 3: assert(false)
+    maybeTrace()
     quit(1)
   if msg >= errMin and msg <= errMax: 
-    if gVerbosity >= 3: assert(false)
+    maybeTrace()
     inc(gErrorCounter)
     options.gExitcode = 1'i8
     if gErrorCounter >= gErrorMax or eh == doAbort: 
-      if gVerbosity >= 3: assert(false)
-      quit(1)                 # one error stops the compiler
+      quit(1)                        # one error stops the compiler
     elif eh == doRaise:
       raiseRecoverableError(s)
-  
+
 proc `==`*(a, b: TLineInfo): bool = 
   result = a.line == b.line and a.fileIndex == b.fileIndex
 

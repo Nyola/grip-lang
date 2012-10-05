@@ -923,8 +923,9 @@ proc declaration(p: var TParser): PNode =
       addSon(pragmas, newIdentNodeP("cdecl", p))
     elif pfStdcall in p.options.flags:
       addSon(pragmas, newIdentNodeP("stdcall", p))
-    addSon(result, exportSym(p, name, origName), ast.emptyNode) # no generics
-    addSon(result, params, pragmas)
+    # no pattern, no exceptions:
+    addSon(result, exportSym(p, name, origName), ast.emptyNode, ast.emptyNode)
+    addSon(result, params, pragmas, ast.emptyNode) # no exceptions
     case p.tok.xkind 
     of pxSemicolon: 
       getTok(p)
@@ -1381,7 +1382,7 @@ proc nestedStatement(p: var TParser): PNode =
   # Nimrod requires complex statements to be nested in whitespace!
   const
     complexStmt = {nkProcDef, nkMethodDef, nkConverterDef, nkMacroDef,
-      nkTemplateDef, nkIteratorDef, nkMacroStmt, nkIfStmt,
+      nkTemplateDef, nkIteratorDef, nkIfStmt,
       nkWhenStmt, nkForStmt, nkWhileStmt, nkCaseStmt, nkVarSection, 
       nkConstSection, nkTypeSection, nkTryStmt, nkBlockStmt, nkStmtList,
       nkCommentStmt, nkStmtListExpr, nkBlockExpr, nkStmtListType, nkBlockType}

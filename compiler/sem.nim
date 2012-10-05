@@ -22,13 +22,19 @@ proc semPass*(): TPass
 
 type 
   TExprFlag = enum 
-    efLValue, efWantIterator, efInTypeof
+    efLValue, efWantIterator, efInTypeof, efWantStmt, efDetermineType
   TExprFlags = set[TExprFlag]
 
 proc semExpr(c: PContext, n: PNode, flags: TExprFlags = {}): PNode
 proc semExprWithType(c: PContext, n: PNode, flags: TExprFlags = {}): PNode
+proc semExprNoType(c: PContext, n: PNode): PNode
+proc semExprNoDeref(c: PContext, n: PNode, flags: TExprFlags = {}): PNode
+proc semProcBody(c: PContext, n: PNode): PNode
+
 proc fitNode(c: PContext, formal: PType, arg: PNode): PNode
-proc semLambda(c: PContext, n: PNode): PNode
+proc changeType(n: PNode, newType: PType)
+
+proc semLambda(c: PContext, n: PNode, flags: TExprFlags): PNode
 proc semTypeNode(c: PContext, n: PNode, prev: PType): PType
 proc semStmt(c: PContext, n: PNode): PNode
 proc semParamList(c: PContext, n, genericParams: PNode, s: PSym)
@@ -36,6 +42,9 @@ proc addParams(c: PContext, n: PNode, kind: TSymKind)
 proc addResult(c: PContext, t: PType, info: TLineInfo, owner: TSymKind)
 proc addResultNode(c: PContext, n: PNode)
 proc instGenericContainer(c: PContext, n: PNode, header: PType): PType
+proc tryExpr(c: PContext, n: PNode, flags: TExprFlags = {}): PNode
+proc fixImmediateParams(n: PNode): PNode
+proc activate(c: PContext, n: PNode)
 
 proc typeMismatch(n: PNode, formal, actual: PType) = 
   if formal.kind != tyError and actual.kind != tyError: 
@@ -103,55 +112,17 @@ proc semConstExpr(c: PContext, n: PNode): PNode =
     return n
   result = evalTypedExpr(c, e)
 
-proc evalPattern(c: PContext, n: PNode, info: TLineInfo): PNode =
-  InternalAssert n.kind == nkCall and n.sons[0].kind == nkSym
-  # we need to ensure that the resulting AST is semchecked. However, it's
-  # aweful to semcheck before macro invocation, so we don't and treat
-  # templates and macros as immediate in this context.
-  var rule: string
-  if optHints in gOptions and hintPattern in gNotes:
-    rule = renderTree(n, {renderNoComments})
-  let s = n.sons[0].sym
-  case s.kind
-  of skMacro:
-    result = semMacroExpr(c, n, n, s)
-  of skTemplate:
-    result = semTemplateExpr(c, n, s)
-  else:
-    result = semDirectOp(c, n, {})
-  if optHints in gOptions and hintPattern in gNotes:
-    Message(info, hintPattern, rule & " --> '" & 
-      renderTree(result, {renderNoComments}) & "'")
+include hlo, seminst, semcall
 
-proc applyPatterns(c: PContext, n: PNode): PNode =
-  # fast exit:
-  if c.patterns.len == 0 or optPatterns notin gOptions: return n
-  result = n
-  # we apply the last pattern first, so that pattern overriding is possible;
-  # however the resulting AST would better not trigger the old rule then
-  # anymore ;-)
-  for i in countdown(<c.patterns.len, 0):
-    let pattern = c.patterns[i]
-    if not isNil(pattern):
-      let x = applyRule(c, pattern, result)
-      if not isNil(x):
-        assert x.kind in {nkStmtList, nkCall}
-        inc(evalTemplateCounter)
-        if evalTemplateCounter > 100:
-          GlobalError(n.info, errTemplateInstantiationTooNested)
-        # deactivate this pattern:
-        c.patterns[i] = nil
-        if x.kind == nkStmtList:
-          assert x.len == 3
-          x.sons[1] = evalPattern(c, x.sons[1], n.info)
-          result = flattenStmts(x)
-        else:
-          result = evalPattern(c, x, n.info)
-        dec(evalTemplateCounter)
-        # activate this pattern again:
-        c.patterns[i] = pattern
+proc symFromType(t: PType, info: TLineInfo): PSym =
+  if t.sym != nil: return t.sym
+  result = newSym(skType, getIdent"AnonType", t.owner, info)
+  result.flags.incl sfAnon
+  result.typ = t
 
-include seminst, semcall
+proc symNodeFromType(c: PContext, t: PType, info: TLineInfo): PNode =
+  result = newSymNode(symFromType(t, info), info)
+  result.typ = makeTypeDesc(c, t)
 
 proc semAfterMacroCall(c: PContext, n: PNode, s: PSym): PNode = 
   inc(evalTemplateCounter)
@@ -159,21 +130,25 @@ proc semAfterMacroCall(c: PContext, n: PNode, s: PSym): PNode =
     GlobalError(s.info, errTemplateInstantiationTooNested)
 
   result = n
-  case s.typ.sons[0].kind
-  of tyExpr:
-    # BUGFIX: we cannot expect a type here, because module aliases would not 
-    # work then (see the ``tmodulealias`` test)
-    # semExprWithType(c, result)
-    result = semExpr(c, result)
-  of tyStmt:
+  if s.typ.sons[0] == nil:
     result = semStmt(c, result)
-  of tyTypeDesc:
-    if n.kind == nkStmtList: result.kind = nkStmtListType
-    result.typ = semTypeNode(c, result, nil)
   else:
-    result = semExpr(c, result)
-    result = fitNode(c, s.typ.sons[0], result)
-    #GlobalError(s.info, errInvalidParamKindX, typeToString(s.typ.sons[0]))
+    case s.typ.sons[0].kind
+    of tyExpr:
+      # BUGFIX: we cannot expect a type here, because module aliases would not 
+      # work then (see the ``tmodulealias`` test)
+      # semExprWithType(c, result)
+      result = semExpr(c, result)
+    of tyStmt:
+      result = semStmt(c, result)
+    of tyTypeDesc:
+      if n.kind == nkStmtList: result.kind = nkStmtListType
+      var typ = semTypeNode(c, result, nil)
+      result = symNodeFromType(c, typ, n.info)
+    else:
+      result = semExpr(c, result)
+      result = fitNode(c, s.typ.sons[0], result)
+      #GlobalError(s.info, errInvalidParamKindX, typeToString(s.typ.sons[0]))
   dec(evalTemplateCounter)
 
 proc semMacroExpr(c: PContext, n, nOrig: PNode, sym: PSym, 
@@ -181,8 +156,18 @@ proc semMacroExpr(c: PContext, n, nOrig: PNode, sym: PSym,
   markUsed(n, sym)
   if sym == c.p.owner:
     GlobalError(n.info, errRecursiveDependencyX, sym.name.s)
+
   if c.evalContext == nil:
     c.evalContext = newEvalContext(c.module, "", emStatic)
+    c.evalContext.getType = proc (n: PNode): PNode =
+      var e = tryExpr(c, n)
+      if e == nil:
+        result = symNodeFromType(c, errorType(c), n.info)
+      elif e.typ == nil:
+        result = newSymNode(getSysSym"void")
+      else:
+        result = symNodeFromType(c, e.typ, n.info)
+
   result = evalMacroCall(c.evalContext, n, nOrig, sym)
   if semCheck: result = semAfterMacroCall(c, result, sym)
 
@@ -201,7 +186,7 @@ proc semConstBoolExpr(c: PContext, n: PNode): PNode =
     LocalError(n.info, errConstExprExpected)
     result = nn
 
-include semtypes, semtempl, semexprs, semgnrc, semstmts
+include semtypes, semtempl, semgnrc, semstmts, semexprs
 
 proc addCodeForGenerics(c: PContext, n: PNode) = 
   for i in countup(c.generics.lastGenericIdx, Len(c.generics.generics) - 1):
@@ -251,8 +236,11 @@ proc SemStmtAndGenerateGenerics(c: PContext, n: PNode): PNode =
       # a generic has been added to `a`:
       if result.kind != nkEmpty: addSon(a, result)
       result = a
+  result = hloStmt(c, result)
+  if gCmd == cmdInteractive and not isEmptyType(result.typ):
+    result = buildEchoStmt(c, result)
   result = transformStmt(c.module, result)
-
+    
 proc RecoverContext(c: PContext) = 
   # clean up in case of a semantic error: We clean up the stacks, etc. This is
   # faster than wrapping every stack operation in a 'try finally' block and 
@@ -268,10 +256,12 @@ proc myProcess(context: PPassContext, n: PNode): PNode =
     result = SemStmtAndGenerateGenerics(c, n)
   else:
     let oldContextLen = msgs.getInfoContextLen()
+    let oldInGenericInst = c.InGenericInst
     try:
       result = SemStmtAndGenerateGenerics(c, n)
     except ERecoverableError:
       RecoverContext(c)
+      c.InGenericInst = oldInGenericInst
       result = ast.emptyNode
       msgs.setInfoContextLen(oldContextLen)
       if gCmd == cmdIdeTools: findSuggest(c, n)
@@ -295,7 +285,7 @@ proc myClose(context: PPassContext, n: PNode): PNode =
   popOwner()
   popProcCon(c)
 
-proc semPass(): TPass = 
+proc semPass(): TPass =
   initPass(result)
   result.open = myOpen
   result.openCached = myOpenCached

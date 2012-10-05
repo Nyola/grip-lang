@@ -51,10 +51,11 @@ type
   `nil` {.magic: "Nil".}
   expr* {.magic: Expr.} ## meta type to denote an expression (for templates)
   stmt* {.magic: Stmt.} ## meta type to denote a statement (for templates)
-  typeDesc* {.magic: TypeDesc.} ## meta type to denote
-                                ## a type description (for templates)
-  void* {.magic: "VoidType".}  ## meta type to denote the absense of any type
-  
+  typeDesc* {.magic: TypeDesc.} ## meta type to denote a type description
+  void* {.magic: "VoidType".}   ## meta type to denote the absense of any type
+  auto* = expr
+  any* = distinct auto
+
   TSignedInt* = int|int8|int16|int32|int64
     ## type class matching all signed integer types
 
@@ -111,6 +112,11 @@ proc new*[T](a: var ref T) {.magic: "New", noSideEffect.}
   ## creates a new object of type ``T`` and returns a safe (traced)
   ## reference to it in ``a``.
 
+proc new(T: typedesc): ref T =
+  ## creates a new object of type ``T`` and returns a safe (traced)
+  ## reference to it as result value
+  new(result)
+  
 proc internalNew*[T](a: var ref T) {.magic: "New", noSideEffect.}
   ## leaked implementation detail. Do not use.
 
@@ -167,9 +173,6 @@ proc `..`*[T](a, b: T): TSlice[T] {.noSideEffect, inline.} =
 proc `..`*[T](b: T): TSlice[T] {.noSideEffect, inline.} =
   ## `slice`:idx: operator that constructs an interval ``[default(T), b]``
   result.b = b
-
-proc contains*[T](s: TSlice[T], value: T): bool {.noSideEffect, inline.} = 
-  result = value >= s.a and value <= s.b
 
 when not defined(niminheritable):
   {.pragma: inheritable.}
@@ -541,7 +544,7 @@ proc abs*(x: int64): int64 {.magic: "AbsI64", noSideEffect.}
   ## checking is turned on).
 
 type
-  IntMax32 = distinct int|int8|int16|int32
+  IntMax32 = int|int8|int16|int32
 
 proc `+%` *(x, y: IntMax32): IntMax32 {.magic: "AddU", noSideEffect.}
 proc `+%` *(x, y: Int64): Int64 {.magic: "AddU", noSideEffect.}
@@ -671,6 +674,9 @@ proc contains*[T](x: set[T], y: T): bool {.magic: "InSet", noSideEffect.}
   ## ``set[char]``! The solution is to bind ``T`` to ``range['a'..'z']``. This
   ## is achieved by reversing the parameters for ``contains``; ``in`` then
   ## passes its arguments in reverse order.
+
+proc contains*[T](s: TSlice[T], value: T): bool {.noSideEffect, inline.} =
+  result = s.a <= value and value <= s.b
 
 template `in` * (x, y: expr): expr {.immediate.} = contains(y, x)
 template `not_in` * (x, y: expr): expr {.immediate.} = not contains(y, x)
@@ -829,7 +835,8 @@ when taintMode:
 else:
   type TaintedString* = string
 
-
+when defined(profiler):
+  proc nimProfile() {.compilerProc, noinline.}
 when hasThreadSupport:
   {.pragma: rtlThreadVar, threadvar.}
 else:
@@ -1314,11 +1321,10 @@ iterator items*(a: cstring): char {.inline.} =
     yield a[i]
     inc(i)
 
-when not defined(booting):
-  iterator items*(E: typedesc[enum]): E =
-    ## iterates over the values of the enum ``E``.
-    for v in low(E)..high(E):
-      yield v
+iterator items*(E: typedesc[enum]): E =
+  ## iterates over the values of the enum ``E``.
+  for v in low(E)..high(E):
+    yield v
 
 iterator pairs*[T](a: openarray[T]): tuple[key: int, val: T] {.inline.} =
   ## iterates over each item of `a`. Yields ``(index, a[index])`` pairs.
@@ -1628,7 +1634,7 @@ type
     len: int  # length of slots (when not debugging always zero)
 
 when not defined(ECMAScript):
-  {.push stack_trace:off.}
+  {.push stack_trace:off, profiler:off.}
   proc add*(x: var string, y: cstring) {.noStackFrame.} =
     var i = 0
     while y[i] != '\0':
@@ -1648,7 +1654,7 @@ else:
 
   proc add*(x: var cstring, y: cstring) {.magic: "AppendStrStr".}
 
-proc echo*[T](x: varargs[T, `$`]) {.magic: "Echo", noSideEffect.}
+proc echo*[T](x: varargs[T, `$`]) {.magic: "Echo".}
   ## special built-in that takes a variable number of arguments. Each argument
   ## is converted to a string via ``$``, so it works for user-defined
   ## types that have an overloaded ``$`` operator.
@@ -1656,10 +1662,11 @@ proc echo*[T](x: varargs[T, `$`]) {.magic: "Echo", noSideEffect.}
   ## available for the ECMAScript target too.
   ## Unlike other IO operations this is guaranteed to be thread-safe as
   ## ``echo`` is very often used for debugging convenience.
-  ##
-  ## As a special semantic rule, ``echo`` pretends to be free of
-  ## side effects, so that it can be used for debugging routines marked as
-  ## ``noSideEffect``.
+
+proc debugEcho*[T](x: varargs[T, `$`]) {.magic: "Echo", noSideEffect.}
+  ## Same as ``echo``, but as a special semantic rule, ``debugEcho`` pretends
+  ## to be free of side effects, so that it can be used for debugging routines
+  ## marked as ``noSideEffect``.
 
 template newException*(exceptn: typeDesc, message: string): expr =
   ## creates an exception object of type ``exceptn`` and sets its ``msg`` field
@@ -1671,8 +1678,12 @@ template newException*(exceptn: typeDesc, message: string): expr =
   e.msg = message
   e
 
+proc getTypeInfo*[T](x: T): pointer {.magic: "GetTypeInfo".}
+  ## get type information for `x`. Ordinary code should not use this, but
+  ## the `typeinfo` module instead.
+
 when not defined(EcmaScript) and not defined(NimrodVM):
-  {.push stack_trace: off.}
+  {.push stack_trace: off, profiler:off.}
 
   proc initGC()
   when not defined(boehmgc) and not defined(useMalloc):
@@ -1956,7 +1967,7 @@ when not defined(EcmaScript) and not defined(NimrodVM):
       ## gets the stack trace associated with `e`, which is the stack that
       ## lead to the ``raise`` statement. This is only works for debug builds.
       
-  {.push stack_trace: off.}
+  {.push stack_trace: off, profiler:off.}
   when hostOS == "standalone":
     include "system/embedded"
   else:
@@ -1995,7 +2006,7 @@ when not defined(EcmaScript) and not defined(NimrodVM):
       result = n.sons[n.len]
 
   include "system/mmdisp"
-  {.push stack_trace: off.}
+  {.push stack_trace: off, profiler:off.}
   when hostOS != "standalone": include "system/sysstr"
   {.pop.}
 
@@ -2030,7 +2041,7 @@ when not defined(EcmaScript) and not defined(NimrodVM):
       var e = getCurrentException()
       return if e == nil: "" else: e.msg
 
-  {.push stack_trace: off.}
+  {.push stack_trace: off, profiler:off.}
   when defined(endb):
     include "system/debugger"
 
@@ -2105,7 +2116,7 @@ proc `/`*(x, y: int): float {.inline, noSideEffect.} =
   ## integer division that results in a float.
   result = toFloat(x) / toFloat(y)
 
-template `-|`(b, s: expr): expr =
+template `-|`*(b, s: expr): expr =
   (if b >= 0: b else: s.len + b)
 
 proc `[]`*(s: string, x: TSlice[int]): string {.inline.} =
@@ -2206,10 +2217,6 @@ proc `[]=`*[T](s: var seq[T], x: TSlice[int], b: openArray[T]) =
     for i in 0 .. <L: s[i+a] = b[i]
   else:
     spliceImpl(s, a, L, b)
-
-proc getTypeInfo*[T](x: T): pointer {.magic: "GetTypeInfo".}
-  ## get type information for `x`. Ordinary code should not use this, but
-  ## the `typeinfo` module instead.
   
 proc slurp*(filename: string): string {.magic: "Slurp".}
 proc staticRead*(filename: string): string {.magic: "Slurp".}
@@ -2349,9 +2356,8 @@ template eval*(blk: stmt): stmt =
   ## executes a block of code at compile time just as if it was a macro
   ## optionally, the block can return an AST tree that will replace the 
   ## eval expression
-  block:
-    macro payload(x: stmt): stmt = blk
-    payload()
+  macro payload: stmt {.gensym.} = blk
+  payload()
 
 proc insert*(x: var string, item: string, i = 0) {.noSideEffect.} = 
   ## inserts `item` into `x` at position `i`.

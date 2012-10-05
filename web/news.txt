@@ -2,10 +2,55 @@
 News
 ====
 
-2012-XX-XX Version 0.8.XX released
+2012-XX-XX Version 0.9.XX released
 ==================================
 
 Version 0.8.XX has been released! Get it `here <download.html>`_. 
+
+Bugfixes
+--------
+
+
+
+Library Additions
+-----------------
+
+
+
+Changes affecting backwards compatibility
+-----------------------------------------
+
+
+
+Compiler Additions
+------------------
+
+
+
+Language Additions
+------------------
+
+- ``case expressions`` are now supported.
+- table constructors now mimic more closely the syntax of case... of...
+- Nimrod can now infer the return type of a proc from its body
+
+
+2012-09-23 Version 0.9.0 released
+=================================
+
+Version 0.9.0 has been released! Get it `here <download.html>`_. 
+
+Summary
+-------
+
+* Unsigned integers have been added.
+* The integer type promotion rules changed.
+* The template and macro system evolved.
+* Closures have been implemented.
+* Term rewriting macros have been implemented.
+* First steps to unify expressions and statements have been taken.
+* Symbol lookup rules in generics have become stricter to catch more errors.
+
 
 Bugfixes
 --------
@@ -74,7 +119,7 @@ Changes affecting backwards compatibility
   The ``system``, ``os``, ``osproc`` and ``memfiles`` modules use the wide
   string versions of the WinAPI. Use the ``-d:useWinAnsi`` switch to revert
   back to the old behaviour which uses the Ansi string versions.
-- ``static`` and ``do`` are now keywords.
+- ``static``, ``do``, ``interface`` and ``mixin`` are now keywords.
 - Templates now participate in overloading resolution which can break code that
   uses templates in subtle ways. Use the new ``immediate`` pragma for templates
   to get a template of old behaviour.
@@ -113,6 +158,7 @@ Changes affecting backwards compatibility
   from ``TObject``.
 - Macros now receive parameters like templates do; use the ``callsite`` builtin
   to gain access to the invocation AST.
+- Symbol lookup rules in generics have become stricter to catch more errors.
 
 
 Compiler Additions
@@ -133,6 +179,7 @@ Compiler Additions
 - The compiler now supports the ``dynlib`` pragma for variables.
 - The compiler now supports ``bycopy`` and ``byref`` pragmas that affect how
   objects/tuples are passed.
+- The embedded profiler became a stack trace profiler and has been documented.
 
 
 Language Additions
@@ -162,6 +209,12 @@ Language Additions
   in templates.
 - Comments can be continued with a backslash continuation character so that
   comment pieces don't have to align on the same column.
+- Enums can be annotated with ``pure`` so that their field names do not pollute
+  the current scope.
+- A proc body can consist of an expression that has a type. This is rewritten
+  to ``result = expression`` then.
+- Term rewriting macros (see `trmacros <http://nimrod-code.org/trmacros.html>`_)
+  have been implemented but are still in alpha.
 
 
 2012-02-09 Version 0.8.14 released

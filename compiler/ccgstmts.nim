@@ -87,7 +87,7 @@ proc genSimpleBlock(p: BProc, stmts: PNode) {.inline.} =
   genStmts(p, stmts)
   endBlock(p)
 
-template preserveBreakIdx(body: stmt): stmt =
+template preserveBreakIdx(body: stmt): stmt {.immediate.} =
   var oldBreakIdx = p.breakIdx
   body
   p.breakIdx = oldBreakIdx
@@ -163,6 +163,7 @@ proc genConstStmt(p: BProc, t: PNode) =
     if it.kind == nkCommentStmt: continue 
     if it.kind != nkConstDef: InternalError(t.info, "genConstStmt")
     var c = it.sons[0].sym 
+    if c.typ.containsCompileTimeOnly: continue
     if sfFakeConst in c.flags:
       genSingleVar(p, it)
     elif c.typ.kind in ConstantDataTypes and lfNoDecl notin c.loc.flags and
@@ -265,6 +266,10 @@ proc genWhileStmt(p: BProc, t: PNode) =
       let label = assignLabel(p.blocks[p.breakIdx])
       lineF(p, cpsStmts, "if (!$1) goto $2;$n", [rdLoc(a), label])
     genStmts(p, t.sons[1])
+
+    if optProfiler in p.options:
+      # invoke at loop body exit:
+      lineCg(p, cpsStmts, "#nimProfile();$n")
     endBlock(p)
 
   dec(p.withinLoop)
@@ -853,9 +858,10 @@ proc genStmts(p: BProc, t: PNode) =
     # transf is overly aggressive with 'nkFastAsgn', so we work around here.
     # See tests/run/tcnstseq3 for an example that would fail otherwise.
     genAsgn(p, t, fastAsgn=p.prc != nil)
-  of nkDiscardStmt: 
-    genLineDir(p, t)
-    initLocExpr(p, t.sons[0], a)
+  of nkDiscardStmt:
+    if t.sons[0].kind != nkEmpty:
+      genLineDir(p, t)
+      initLocExpr(p, t.sons[0], a)
   of nkAsmStmt: genAsmStmt(p, t)
   of nkTryStmt: 
     if gCmd == cmdCompileToCpp: genTryStmtCpp(p, t)

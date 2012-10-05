@@ -17,10 +17,19 @@ import
 type
   TPatternContext = object
     owner: PSym
-    mapping: TIdNodeTable  # maps formal parameters to nodes
+    mapping: seq[PNode]  # maps formal parameters to nodes
+    formals: int
     c: PContext
-    subMatch: bool         # subnode matches are special
+    subMatch: bool       # subnode matches are special
   PPatternContext = var TPatternContext
+
+proc getLazy(c: PPatternContext, sym: PSym): PNode =
+  if not isNil(c.mapping):
+    result = c.mapping[sym.position]
+
+proc putLazy(c: PPatternContext, sym: PSym, n: PNode) =
+  if isNil(c.mapping): newSeq(c.mapping, c.formals)
+  c.mapping[sym.position] = n
 
 proc matches(c: PPatternContext, p, n: PNode): bool
 
@@ -59,9 +68,9 @@ proc inSymChoice(sc, x: PNode): bool =
   elif sc.kind == nkOpenSymChoice:
     # same name suffices for open sym choices!
     result = sc.sons[0].sym.name.id == x.sym.name.id
-
+  
 proc checkTypes(c: PPatternContext, p: PSym, n: PNode): bool =
-  # check param constraints first here as this quite optimized:
+  # check param constraints first here as this is quite optimized:
   if p.typ.constraint != nil:
     result = matchNodeKinds(p.typ.constraint, n)
     if not result: return
@@ -78,37 +87,53 @@ proc matchChoice(c: PPatternContext, p, n: PNode): bool =
     if matches(c, p.sons[i], n): return true
 
 proc bindOrCheck(c: PPatternContext, param: PSym, n: PNode): bool =
-  var pp = IdNodeTableGetLazy(c.mapping, param)
+  var pp = GetLazy(c, param)
   if pp != nil:
     # check if we got the same pattern (already unified):
     result = sameTrees(pp, n) #matches(c, pp, n)
   elif n.kind == nkArgList or checkTypes(c, param, n):
-    IdNodeTablePutLazy(c.mapping, param, n)
+    PutLazy(c, param, n)
     result = true
 
-proc matchStar(c: PPatternContext, p, n: PNode): bool =
-  # match ``op*param``
+proc gather(c: PPatternContext, param: PSym, n: PNode) =
+  var pp = GetLazy(c, param)
+  if pp != nil and pp.kind == nkArgList:
+    pp.add(n)
+  else:
+    pp = newNodeI(nkArgList, n.info, 1)
+    pp.sons[0] = n
+    PutLazy(c, param, pp)
 
-  proc matchStarAux(c: PPatternContext, op, n, arglist: PNode) =
-    if n.kind in nkCallKinds and matches(c, op, n.sons[0]):
+proc matchNested(c: PPatternContext, p, n: PNode, rpn: bool): bool =
+  # match ``op * param`` or ``op *| param``
+  proc matchStarAux(c: PPatternContext, op, n, arglist: PNode,
+                    rpn: bool): bool =
+    result = true
+    if n.kind in nkCallKinds and matches(c, op.sons[1], n.sons[0]):
       for i in 1..sonsLen(n)-1:
-        matchStarAux(c, op, n[i], arglist)    
+        if not matchStarAux(c, op, n[i], arglist, rpn): return false
+      if rpn: arglist.add(n.sons[0])
     elif n.kind == nkHiddenStdConv and n.sons[1].kind == nkBracket:
       let n = n.sons[1]
-      for i in 0.. <n.len: matchStarAux(c, op, n[i], arglist)
-    else:
+      for i in 0.. <n.len: 
+        if not matchStarAux(c, op, n[i], arglist, rpn): return false
+    elif checkTypes(c, p.sons[2].sym, n):
       add(arglist, n)
+    else:
+      result = false
     
   if n.kind notin nkCallKinds: return false
   if matches(c, p.sons[1], n.sons[0]):
     var arglist = newNodeI(nkArgList, n.info)
-    matchStarAux(c, p.sons[1], n, arglist)
-    result = bindOrCheck(c, p.sons[2].sym, arglist)
+    if matchStarAux(c, p, n, arglist, rpn):
+      result = bindOrCheck(c, p.sons[2].sym, arglist)
 
 proc matches(c: PPatternContext, p, n: PNode): bool =
   # hidden conversions (?)
   if isPatternParam(c, p):
     result = bindOrCheck(c, p.sym, n)
+  elif n.kind == nkSym and p.kind == nkIdent:
+    result = p.ident.id == n.sym.name.id
   elif n.kind == nkSym and inSymChoice(p, n):
     result = true
   elif n.kind == nkSym and n.sym.kind == skConst:
@@ -120,15 +145,21 @@ proc matches(c: PPatternContext, p, n: PNode): bool =
     let opr = p.sons[0].ident.s
     case opr
     of "|": result = matchChoice(c, p, n)
-    of "*": result = matchStar(c, p, n)
+    of "*": result = matchNested(c, p, n, rpn=false)
+    of "**": result = matchNested(c, p, n, rpn=true)
     of "~": result = not matches(c, p.sons[1], n)
     else: InternalError(p.info, "invalid pattern")
     # template {add(a, `&` * b)}(a: string{noalias}, b: varargs[string]) = 
     #   add(a, b)
   elif p.kind == nkCurlyExpr:
-    assert isPatternParam(c, p.sons[1])
-    if matches(c, p.sons[0], n):
-      result = bindOrCheck(c, p.sons[1].sym, n)
+    if p.sons[1].kind == nkPrefix:
+      if matches(c, p.sons[0], n):
+        gather(c, p.sons[1].sons[1].sym, n)
+        result = true
+    else:
+      assert isPatternParam(c, p.sons[1])
+      if matches(c, p.sons[0], n):
+        result = bindOrCheck(c, p.sons[1].sym, n)
   elif sameKinds(p, n):
     case p.kind
     of nkSym: result = p.sym == n.sym
@@ -142,17 +173,29 @@ proc matches(c: PPatternContext, p, n: PNode): bool =
       var plen = sonsLen(p)
       # special rule for p(X) ~ f(...); this also works for stuff like
       # partial case statements, etc! - Not really ... :-/
-      if plen <= sonsLen(n):
-        let v = lastSon(p)
-        if isPatternParam(c, v) and v.sym.typ.kind == tyVarargs:
+      let v = lastSon(p)
+      if isPatternParam(c, v) and v.sym.typ.kind == tyVarargs:
+        var arglist: PNode
+        if plen <= sonsLen(n):
           for i in countup(0, plen - 2):
             if not matches(c, p.sons[i], n.sons[i]): return
-          var arglist = newNodeI(nkArgList, n.info, sonsLen(n) - plen + 1)
-          # f(1, 2, 3)
-          # p(X)
-          for i in countup(0, sonsLen(n) - plen):
-            arglist.sons[i] = n.sons[i + plen - 1]
-          # check or bind 'X':
+          if plen == sonsLen(n) and lastSon(n).kind == nkHiddenStdConv and
+              lastSon(n).sons[1].kind == nkBracket:
+            # unpack varargs:
+            let n = lastSon(n).sons[1]
+            arglist = newNodeI(nkArgList, n.info, n.len)
+            for i in 0.. <n.len: arglist.sons[i] = n.sons[i]
+          else:
+            arglist = newNodeI(nkArgList, n.info, sonsLen(n) - plen + 1)
+            # f(1, 2, 3)
+            # p(X)
+            for i in countup(0, sonsLen(n) - plen):
+              arglist.sons[i] = n.sons[i + plen - 1]
+          return bindOrCheck(c, v.sym, arglist)
+        elif plen-1 == sonsLen(n):
+          for i in countup(0, plen - 2):
+            if not matches(c, p.sons[i], n.sons[i]): return
+          arglist = newNodeI(nkArgList, n.info)
           return bindOrCheck(c, v.sym, arglist)
       if plen == sonsLen(n):
         for i in countup(0, sonsLen(p) - 1):
@@ -164,7 +207,7 @@ proc matchStmtList(c: PPatternContext, p, n: PNode): PNode =
     for j in 0 .. <p.len:
       if not matches(c, p.sons[j], n.sons[i+j]):
         # we need to undo any bindings:
-        if not isNil(c.mapping.data): reset(c.mapping)
+        if not isNil(c.mapping): c.mapping = nil
         return false
     result = true
   
@@ -182,14 +225,24 @@ proc matchStmtList(c: PPatternContext, p, n: PNode): PNode =
   elif matches(c, p, n):
     result = n
 
-# writeln(X, a); writeln(X, b); --> writeln(X, a, b)
+proc aliasAnalysisRequested(params: PNode): bool =
+  if params.len >= 2:
+    for i in 1 .. < params.len:
+      let param = params.sons[i].sym
+      if whichAlias(param) != aqNone: return true
+
+proc addToArgList(result, n: PNode) =
+  if n.typ != nil and n.typ.kind != tyStmt:
+    if n.kind != nkArgList: result.add(n)
+    else:
+      for i in 0 .. <n.len: result.add(n.sons[i])
 
 proc applyRule*(c: PContext, s: PSym, n: PNode): PNode =
   ## returns a tree to semcheck if the rule triggered; nil otherwise
   var ctx: TPatternContext
   ctx.owner = s
   ctx.c = c
-  # we perform 'initIdNodeTable' lazily for performance
+  ctx.formals = sonsLen(s.typ)-1
   var m = matchStmtList(ctx, s.ast.sons[patternPos], n)
   if isNil(m): return nil
   # each parameter should have been bound; we simply setup a call and
@@ -197,36 +250,40 @@ proc applyRule*(c: PContext, s: PSym, n: PNode): PNode =
   result = newNodeI(nkCall, n.info)
   result.add(newSymNode(s, n.info))
   let params = s.typ.n
+  let requiresAA = aliasAnalysisRequested(params)
+  var args: PNode
+  if requiresAA:
+    args = newNodeI(nkArgList, n.info)
   for i in 1 .. < params.len:
     let param = params.sons[i].sym
-    let x = IdNodeTableGetLazy(ctx.mapping, param)
+    let x = GetLazy(ctx, param)
     # couldn't bind parameter:
     if isNil(x): return nil
     result.add(x)
+    if requiresAA: addToArgList(args, n)
   # perform alias analysis here:
-  if params.len >= 2:
+  if requiresAA:
     for i in 1 .. < params.len:
+      var rs = result.sons[i]
       let param = params.sons[i].sym
       case whichAlias(param)
       of aqNone: nil
       of aqShouldAlias:
         # it suffices that it aliases for sure with *some* other param:
         var ok = false
-        for j in 1 .. < result.len:
-          if j != i and result.sons[j].typ != nil:
-            if aliases.isPartOf(result[i], result[j]) == arYes:
-              ok = true
-              break
+        for arg in items(args):
+          if arg != rs and aliases.isPartOf(rs, arg) == arYes:
+            ok = true
+            break
         # constraint not fullfilled:
         if not ok: return nil
       of aqNoAlias:
         # it MUST not alias with any other param:
         var ok = true
-        for j in 1 .. < result.len:
-          if j != i and result.sons[j].typ != nil:
-            if aliases.isPartOf(result[i], result[j]) != arNo:
-              ok = false
-              break
+        for arg in items(args):
+          if arg != rs and aliases.isPartOf(rs, arg) != arNo:
+            ok = false
+            break
         # constraint not fullfilled:
         if not ok: return nil
 

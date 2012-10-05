@@ -140,6 +140,14 @@ proc mangleName(s: PSym): PRope =
 proc isCompileTimeOnly(t: PType): bool =
   result = t.kind in {tyTypedesc, tyExpr}
 
+proc containsCompileTimeOnly(t: PType): bool =
+  if isCompileTimeOnly(t): return true
+  if t.sons != nil:
+    for i in 0 .. <t.sonsLen:
+      if t.sons[i] != nil and isCompileTimeOnly(t.sons[i]):
+        return true
+  return false
+
 var anonTypeName = toRope"TY"
 
 proc typeName(typ: PType): PRope =
@@ -174,7 +182,7 @@ proc mapType(typ: PType): TCTypeKind =
   of tyOpenArray, tyArrayConstr, tyArray, tyVarargs: result = ctArray
   of tyObject, tyTuple: result = ctStruct
   of tyGenericBody, tyGenericInst, tyGenericParam, tyDistinct, tyOrdinal,
-     tyConst, tyMutable, tyIter, tyTypeDesc: 
+     tyConst, tyMutable, tyIter, tyTypeDesc:
     result = mapType(lastSon(typ))
   of tyEnum: 
     if firstOrd(typ) < 0: 
@@ -290,6 +298,7 @@ proc genProcParams(m: BModule, t: PType, rettype, params: var PRope,
     if t.n.sons[i].kind != nkSym: InternalError(t.n.info, "genProcParams")
     var param = t.n.sons[i].sym
     if isCompileTimeOnly(param.typ): continue
+    if params != nil: app(params, ", ")
     fillLoc(param.loc, locParam, param.typ, mangleName(param), OnStack)
     app(params, getParamTypeDesc(m, param.typ, check))
     if ccgIntroducedPtr(param): 
@@ -309,7 +318,6 @@ proc genProcParams(m: BModule, t: PType, rettype, params: var PRope,
       appff(params, ", NI $1Len$2", ", @NI $1Len$2", [param.loc.r, j.toRope])
       inc(j)
       arr = arr.sons[0]
-    if i < sonsLen(t.n) - 1: app(params, ", ")
   if (t.sons[0] != nil) and isInvalidReturnType(t.sons[0]): 
     var arr = t.sons[0]
     if params != nil: app(params, ", ")
@@ -677,17 +685,18 @@ proc getNimNode(m: BModule): PRope =
   result = ropef("$1[$2]", [m.typeNodesName, toRope(m.typeNodes)])
   inc(m.typeNodes)
 
-proc getNimType(m: BModule): PRope = 
-  result = ropef("$1[$2]", [m.nimTypesName, toRope(m.nimTypes)])
-  inc(m.nimTypes)
+when false:
+  proc getNimType(m: BModule): PRope = 
+    result = ropef("$1[$2]", [m.nimTypesName, toRope(m.nimTypes)])
+    inc(m.nimTypes)
 
-proc allocMemTI(m: BModule, typ: PType, name: PRope) = 
-  var tmp = getNimType(m)
-  appf(m.s[cfsTypeInit2], "$2 = &$1;$n", [tmp, name])
+  proc allocMemTI(m: BModule, typ: PType, name: PRope) = 
+    var tmp = getNimType(m)
+    appf(m.s[cfsTypeInit2], "$2 = &$1;$n", [tmp, name])
 
 proc genTypeInfoAuxBase(m: BModule, typ: PType, name, base: PRope) = 
   var nimtypeKind: int
-  allocMemTI(m, typ, name)
+  #allocMemTI(m, typ, name)
   if (typ.kind == tyObject) and (tfFinal in typ.flags) and
       (typ.sons[0] == nil): 
     nimtypeKind = ord(tyPureObject)
@@ -698,16 +707,17 @@ proc genTypeInfoAuxBase(m: BModule, typ: PType, name, base: PRope) =
   if tfIncompleteStruct in typ.flags: size = toRope"void*"
   else: size = getTypeDesc(m, typ)
   appf(m.s[cfsTypeInit3], 
-       "$1->size = sizeof($2);$n" & "$1->kind = $3;$n" & "$1->base = $4;$n", 
-       [name, size, toRope(nimtypeKind), base])     
+       "$1.size = sizeof($2);$n" & "$1.kind = $3;$n" & "$1.base = $4;$n", 
+       [name, size, toRope(nimtypeKind), base])
   # compute type flags for GC optimization
   var flags = 0
   if not containsGarbageCollectedRef(typ): flags = flags or 1
   if not canFormAcycle(typ): flags = flags or 2        
   #else MessageOut("can contain a cycle: " & typeToString(typ))
   if flags != 0: 
-    appf(m.s[cfsTypeInit3], "$1->flags = $2;$n", [name, toRope(flags)])
-  appf(m.s[cfsVars], "TNimType* $1; /* $2 */$n", 
+    appf(m.s[cfsTypeInit3], "$1.flags = $2;$n", [name, toRope(flags)])
+  discard cgsym(m, "TNimType")
+  appf(m.s[cfsVars], "TNimType $1; /* $2 */$n", 
        [name, toRope(typeToString(typ))])
 
 proc genTypeInfoAux(m: BModule, typ: PType, name: PRope) = 
@@ -719,6 +729,10 @@ proc genTypeInfoAux(m: BModule, typ: PType, name: PRope) =
   genTypeInfoAuxBase(m, typ, name, base)
 
 proc discriminatorTableName(m: BModule, objtype: PType, d: PSym): PRope = 
+  # bugfix: we need to search the type that contains the discriminator:
+  var objtype = objtype
+  while lookupInRecord(objtype.n, d.name) == nil:
+    objtype = objtype.sons[0]
   if objType.sym == nil: 
     InternalError(d.info, "anonymous obj with discriminator")
   result = ropef("NimDT_$1_$2", [
@@ -795,7 +809,7 @@ proc genObjectInfo(m: BModule, typ: PType, name: PRope) =
   else: genTypeInfoAuxBase(m, typ, name, toRope("0"))
   var tmp = getNimNode(m)
   genObjectFields(m, typ, typ.n, tmp)
-  appf(m.s[cfsTypeInit3], "$1->node = &$2;$n", [name, tmp])
+  appf(m.s[cfsTypeInit3], "$1.node = &$2;$n", [name, tmp])
 
 proc genTupleInfo(m: BModule, typ: PType, name: PRope) =
   genTypeInfoAuxBase(m, typ, name, toRope("0"))
@@ -818,7 +832,7 @@ proc genTupleInfo(m: BModule, typ: PType, name: PRope) =
   else: 
     appf(m.s[cfsTypeInit3], "$1.len = $2; $1.kind = 2;$n", 
          [expr, toRope(length)])
-  appf(m.s[cfsTypeInit3], "$1->node = &$2;$n", [name, expr])
+  appf(m.s[cfsTypeInit3], "$1.node = &$2;$n", [name, expr])
 
 proc genEnumInfo(m: BModule, typ: PType, name: PRope) =
   # Type information for enumerations is quite heavy, so we do some
@@ -857,17 +871,17 @@ proc genEnumInfo(m: BModule, typ: PType, name: PRope) =
       toRope(length), m.typeNodesName, toRope(firstNimNode), enumArray, nodePtrs])
   app(m.s[cfsTypeInit3], specialCases)
   appf(m.s[cfsTypeInit3], 
-       "$1.len = $2; $1.kind = 2; $1.sons = &$3[0];$n$4->node = &$1;$n", 
+       "$1.len = $2; $1.kind = 2; $1.sons = &$3[0];$n$4.node = &$1;$n", 
        [getNimNode(m), toRope(length), nodePtrs, name])
   if hasHoles:
     # 1 << 2 is {ntfEnumHole}
-    appf(m.s[cfsTypeInit3], "$1->flags = 1<<2;$n", [name])
+    appf(m.s[cfsTypeInit3], "$1.flags = 1<<2;$n", [name])
 
 proc genSetInfo(m: BModule, typ: PType, name: PRope) = 
   assert(typ.sons[0] != nil)
   genTypeInfoAux(m, typ, name)
   var tmp = getNimNode(m)
-  appf(m.s[cfsTypeInit3], "$1.len = $2; $1.kind = 0;$n" & "$3->node = &$1;$n", 
+  appf(m.s[cfsTypeInit3], "$1.len = $2; $1.kind = 0;$n" & "$3.node = &$1;$n", 
        [tmp, toRope(firstOrd(typ)), name])
 
 proc genArrayInfo(m: BModule, typ: PType, name: PRope) = 
@@ -900,10 +914,11 @@ proc genTypeInfo(m: BModule, typ: PType): PRope =
     # refenrece the type info as extern here
     discard cgsym(m, "TNimType")
     discard cgsym(m, "TNimNode")
-    appf(m.s[cfsVars], "extern TNimType* $1; /* $2 */$n", 
+    appf(m.s[cfsVars], "extern TNimType $1; /* $2 */$n", 
          [result, toRope(typeToString(t))])
-    return
-  if ContainsOrIncl(m.typeInfoMarker, t.id): return
+    return con("(&".toRope, result, ")".toRope)
+  if ContainsOrIncl(m.typeInfoMarker, t.id):
+    return con("(&".toRope, result, ")".toRope)
   case t.kind
   of tyEmpty: result = toRope"0"
   of tyPointer, tyBool, tyChar, tyCString, tyString, tyInt..tyUInt64, tyVar:
@@ -917,7 +932,7 @@ proc genTypeInfo(m: BModule, typ: PType): PRope =
     genTypeInfoAux(m, t, result)
     if optRefcGC in gGlobalOptions:
       let markerProc = genTraverseProc(m, t, tiNew)
-      appf(m.s[cfsTypeInit3], "$1->marker = $2;$n", [result, markerProc])
+      appf(m.s[cfsTypeInit3], "$1.marker = $2;$n", [result, markerProc])
   of tyPtr, tyRange: genTypeInfoAux(m, t, result)
   of tyArrayConstr, tyArray: genArrayInfo(m, t, result)
   of tySet: genSetInfo(m, t, result)
@@ -930,6 +945,7 @@ proc genTypeInfo(m: BModule, typ: PType): PRope =
     # results are not deterministic!
     genTupleInfo(m, t, result)
   else: InternalError("genTypeInfo(" & $t.kind & ')')
+  result = con("(&".toRope, result, ")".toRope)
 
 proc genTypeSection(m: BModule, n: PNode) = 
   nil

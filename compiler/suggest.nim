@@ -51,7 +51,7 @@ proc fieldVisible*(c: PContext, f: PSym): bool {.inline.} =
 
 proc suggestField(c: PContext, s: PSym, outputs: var int) = 
   if filterSym(s) and fieldVisible(c, s):
-    OutWriteln(SymToStr(s, isLocal=true, sectionSuggest))
+    SuggestWriteln(SymToStr(s, isLocal=true, sectionSuggest))
     inc outputs
 
 when not defined(nimhygiene):
@@ -62,7 +62,7 @@ template wholeSymTab(cond, section: expr) {.immediate.} =
     for item in items(c.tab.stack[i]):
       let it {.inject.} = item
       if cond:
-        OutWriteln(SymToStr(it, isLocal = i > ModuleTablePos, section))
+        SuggestWriteln(SymToStr(it, isLocal = i > ModuleTablePos, section))
         inc outputs
 
 proc suggestSymList(c: PContext, list: PNode, outputs: var int) = 
@@ -120,7 +120,7 @@ proc suggestEverything(c: PContext, n: PNode, outputs: var int) =
   for i in countdown(c.tab.tos-1, 1):
     for it in items(c.tab.stack[i]):
       if filterSym(it):
-        OutWriteln(SymToStr(it, isLocal = i > ModuleTablePos, sectionSuggest))
+        SuggestWriteln(SymToStr(it, isLocal = i > ModuleTablePos, sectionSuggest))
         inc outputs
 
 proc suggestFieldAccess(c: PContext, n: PNode, outputs: var int) =
@@ -134,12 +134,12 @@ proc suggestFieldAccess(c: PContext, n: PNode, outputs: var int) =
         # all symbols accessible, because we are in the current module:
         for it in items(c.tab.stack[ModuleTablePos]): 
           if filterSym(it): 
-            OutWriteln(SymToStr(it, isLocal=false, sectionSuggest))
+            SuggestWriteln(SymToStr(it, isLocal=false, sectionSuggest))
             inc outputs
       else: 
         for it in items(n.sym.tab): 
           if filterSym(it): 
-            OutWriteln(SymToStr(it, isLocal=false, sectionSuggest))
+            SuggestWriteln(SymToStr(it, isLocal=false, sectionSuggest))
             inc outputs
     else:
       # fallback:
@@ -175,8 +175,7 @@ proc findClosestDot(n: PNode): PNode =
       if result != nil: return
 
 const
-  CallNodes = {nkCall, nkInfix, nkPrefix, nkPostfix, nkCommand, nkCallStrLit,
-               nkMacroStmt}
+  CallNodes = {nkCall, nkInfix, nkPrefix, nkPostfix, nkCommand, nkCallStrLit}
 
 proc findClosestCall(n: PNode): PNode = 
   if n.kind in callNodes and msgs.inCheckpoint(n.info) == cpExact: 
@@ -224,16 +223,16 @@ var
 proc findUsages(node: PNode, s: PSym) =
   if usageSym == nil and isTracked(node.info, s.name.s.len):
     usageSym = s
-    OutWriteln(SymToStr(s, isLocal=false, sectionUsage))
+    SuggestWriteln(SymToStr(s, isLocal=false, sectionUsage))
   elif s == usageSym:
     if lastLineInfo != node.info:
-      OutWriteln(SymToStr(s, isLocal=false, sectionUsage, node.info))
+      SuggestWriteln(SymToStr(s, isLocal=false, sectionUsage, node.info))
     lastLineInfo = node.info
 
 proc findDefinition(node: PNode, s: PSym) =
   if isTracked(node.info, s.name.s.len):
-    OutWriteln(SymToStr(s, isLocal=false, sectionDef))
-    quit(0)
+    SuggestWriteln(SymToStr(s, isLocal=false, sectionDef))
+    SuggestQuit()
 
 proc suggestSym*(n: PNode, s: PSym) {.inline.} =
   ## misnamed: should be 'symDeclared'
@@ -290,7 +289,7 @@ proc suggestExpr*(c: PContext, node: PNode) =
       suggestCall(c, a, n, outputs)
   
   dec(c.InCompilesContext)
-  if outputs > 0 and optUsages notin gGlobalOptions: quit(0)
+  if outputs > 0 and optUsages notin gGlobalOptions: SuggestQuit()
 
 proc suggestStmt*(c: PContext, n: PNode) = 
   suggestExpr(c, n)

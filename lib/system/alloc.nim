@@ -11,6 +11,7 @@
 # TODO: 
 # - eliminate "used" field
 # - make searching for block O(1)
+{.push profiler:off.}
 
 # ------------ platform specific chunk allocation code -----------------------
 
@@ -728,7 +729,8 @@ template InstantiateForRegion(allocator: expr) =
     proc interiorAllocatedPtr*(p: pointer): pointer =
       result = interiorAllocatedPtr(allocator, p)
 
-    proc isAllocatedPtr*(p: pointer): bool = 
+    proc isAllocatedPtr*(p: pointer): bool =
+      let p = cast[pointer](cast[TAddress](p)-%TAddress(sizeof(TCell)))
       result = isAllocatedPtr(allocator, p)
 
   proc deallocOsPages = deallocOsPages(allocator)
@@ -794,3 +796,4 @@ template InstantiateForRegion(allocator: expr) =
     else:
       result = realloc(p, newsize)
 
+{.pop.}
