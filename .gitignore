@@ -12,6 +12,7 @@
 nimcache
 lib/nimcache
 tools/nimcache
+tools/nimweb
 tests/nimcache
 tests/accept/run/nimcache
 tests/accept/compile/nimcache
@@ -21,11 +22,21 @@ compiler/c2nim/nimcache
 compiler/pas2nim/nimcache
 misc
 doc/*.html
-web/upload/*.html
+doc/*.pdf
+doc/*.idx
+/web/upload
 koch
 compiler/nimrod*
 build/[0-9]_[0-9]
 bin/nimrod
+examples/cross_calculator/nimrod_commandline/nimcalculator
+examples/cross_todo/nimrod_backend/*.html
+examples/cross_todo/nimrod_backend/backend
+examples/cross_todo/nimrod_backend/testbackend
+examples/cross_todo/nimrod_backend/todo.sqlite3
+examples/cross_todo/nimrod_commandline/nimtodo
+install.sh
+deinstall.sh
 
 # iOS specific wildcards.
 *.mode1v3

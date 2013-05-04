@@ -1,7 +1,7 @@
 #
 #
 #         Maintenance program for Nimrod  
-#        (c) Copyright 2012 Andreas Rumpf
+#        (c) Copyright 2013 Andreas Rumpf
 #
 #    See the file "copying.txt", included in this
 #    distribution, for details about the copyright.
@@ -26,7 +26,7 @@ const
 +-----------------------------------------------------------------+
 |         Maintenance program for Nimrod                          |
 |             Version $1|
-|             (c) 2012 Andreas Rumpf                              |
+|             (c) 2013 Andreas Rumpf                              |
 +-----------------------------------------------------------------+
 Build time: $2, $3
 
@@ -36,6 +36,7 @@ Options:
   --help, -h               shows this help and quits
 Possible Commands:
   boot [options]           bootstraps with given command line options
+  install [dir]            installs to given directory
   clean                    cleans Nimrod project; removes generated files
   web                      generates the website
   csource [options]        builds the C sources for installation
@@ -49,6 +50,7 @@ Boot options:
   -d:tinyc                 include the Tiny C backend (not supported on Windows)
   -d:useGnuReadline        use the GNU readline library for interactive mode
                            (not needed on Windows)
+  -d:useFFI                build Nimrod with FFI support at compile time
   -d:nativeStacktrace      use native stack traces (only for Mac OS X or Linux)
 """
 
@@ -83,7 +85,9 @@ proc inno(args: string) =
        NimrodVersion)
 
 proc install(args: string) = 
-  exec("sh ./build.sh")
+  exec("nimrod cc -r tools/niminst/niminst --var:version=$# scripts compiler/nimrod.ini" %
+       NimrodVersion)
+  exec("sh ./install.sh $#" % args)  
 
 proc web(args: string) =
   exec(("nimrod cc -r tools/nimweb.nim web/nimrod --putenv:nimrodversion=$#" &
@@ -214,7 +218,7 @@ when defined(withUpdate):
       if errcode == 0:
         if output == "":
           # No changes
-          echo("No update. Exiting..")
+          echo("No update. Exiting...")
           return
         else:
           echo("Fetching updates from repo...")

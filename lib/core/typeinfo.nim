@@ -1,7 +1,7 @@
 #
 #
 #            Nimrod's Runtime Library
-#        (c) Copyright 2012 Dominik Picheta, Andreas Rumpf
+#        (c) Copyright 2013 Dominik Picheta, Andreas Rumpf
 #
 #    See the file "copying.txt", included in this
 #    distribution, for details about the copyright.
@@ -102,6 +102,16 @@ proc newAny(value: pointer, rawType: PNimType): TAny =
   result.value = value
   result.rawType = rawType
 
+when defined(system.TVarSlot):
+  proc toAny*(x: TVarSlot): TAny {.inline.} =
+    ## constructs a ``TAny`` object from a variable slot ``x``. 
+    ## This captures `x`'s address, so `x` can be modified with its
+    ## ``TAny`` wrapper! The client needs to ensure that the wrapper
+    ## **does not** live longer than `x`!
+    ## This is provided for easier reflection capabilities of a debugger.
+    result.value = x.address
+    result.rawType = x.typ
+
 proc toAny*[T](x: var T): TAny {.inline.} =
   ## constructs a ``TAny`` object from `x`. This captures `x`'s address, so
   ## `x` can be modified with its ``TAny`` wrapper! The client needs to ensure
@@ -139,12 +149,15 @@ proc invokeNewSeq*(x: TAny, len: int) =
   var z = newSeq(x.rawType, len)
   genericShallowAssign(x.value, addr(z), x.rawType)
 
-proc extendSeq*(x: TAny, elems = 1) =
-  ## performs ``setLen(x, x.len+elems)``. `x` needs to represent a ``seq``.
+proc extendSeq*(x: TAny) =
+  ## performs ``setLen(x, x.len+1)``. `x` needs to represent a ``seq``.
   assert x.rawType.kind == tySequence
   var y = cast[ptr PGenSeq](x.value)[]
-  var z = incrSeq(y, x.rawType.base.size * elems)
-  genericShallowAssign(x.value, addr(z), x.rawType)
+  var z = incrSeq(y, x.rawType.base.size)
+  # 'incrSeq' already freed the memory for us and copied over the RC!
+  # So we simply copy the raw pointer into 'x.value':
+  cast[ppointer](x.value)[] = z
+  #genericShallowAssign(x.value, addr(z), x.rawType)
 
 proc setObjectRuntimeType*(x: TAny) =
   ## this needs to be called to set `x`'s runtime object type field.
@@ -197,6 +210,13 @@ proc len*(x: TAny): int =
   of tyArray: result = x.rawType.size div x.rawType.base.size
   of tySequence: result = cast[PGenSeq](cast[ppointer](x.value)[]).len
   else: assert false
+
+
+proc base*(x: TAny): TAny =
+  ## returns base TAny (useful for inherited object types).
+  result.rawType = x.rawType.base
+  result.value = x.value
+
 
 proc isNil*(x: TAny): bool =
   ## `isNil` for an any `x` that represents a sequence, string, cstring,

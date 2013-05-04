@@ -1,7 +1,7 @@
 #
 #
 #            Nimrod's Runtime Library
-#        (c) Copyright 2012 Andreas Rumpf
+#        (c) Copyright 2013 Andreas Rumpf
 #
 #    See the file "copying.txt", included in this
 #    distribution, for details about the copyright.
@@ -21,6 +21,7 @@ const
   alwaysGC = false # collect after every memory allocation (for debugging)
   leakDetector = false
   overwriteFree = false
+  trackAllocationSource = leakDetector
   
   cycleGC = true # (de)activate the cycle GC
   reallyDealloc = true # for debugging purposes this can be set to false
@@ -306,7 +307,15 @@ else:
   include "system/cellsets"
   when not leakDetector:
     sysAssert(sizeof(TCell) == sizeof(TFreeCell), "sizeof TFreeCell")
-  include "system/gc"
+  when compileOption("gc", "v2"):
+    include "system/gc2"
+  elif defined(gcMarkAndSweep):
+    # XXX use 'compileOption' here
+    include "system/gc_ms"
+  elif defined(gcGenerational):
+    include "system/gc_genms"
+  else:
+    include "system/gc"
   
 {.pop.}
 

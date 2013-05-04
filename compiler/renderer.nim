@@ -1,7 +1,7 @@
 #
 #
 #           The Nimrod Compiler
-#        (c) Copyright 2012 Andreas Rumpf
+#        (c) Copyright 2013 Andreas Rumpf
 #
 #    See the file "copying.txt", included in this
 #    distribution, for details about the copyright.
@@ -367,7 +367,7 @@ proc lsub(n: PNode): int =
     else: result = len(atom(n))
   of succ(nkEmpty)..pred(nkTripleStrLit), succ(nkTripleStrLit)..nkNilLit: 
     result = len(atom(n))
-  of nkCall, nkBracketExpr, nkCurlyExpr, nkConv, nkPattern:
+  of nkCall, nkBracketExpr, nkCurlyExpr, nkConv, nkPattern, nkObjConstr:
     result = lsub(n.sons[0]) + lcomma(n, 1) + 2
   of nkHiddenStdConv, nkHiddenSubConv, nkHiddenCallConv: result = lsub(n[1])
   of nkCast: result = lsub(n.sons[0]) + lsub(n.sons[1]) + len("cast[]()")
@@ -425,6 +425,8 @@ proc lsub(n: PNode): int =
   of nkTypeDef: result = lsons(n) + 3
   of nkOfInherit: result = lsub(n.sons[0]) + len("of_")
   of nkProcTy: result = lsons(n) + len("proc_")
+  of nkIteratorTy: result = lsons(n) + len("iterator_")
+  of nkSharedTy: result = lsons(n) + len("shared_")
   of nkEnumTy: 
     if sonsLen(n) > 0:
       result = lsub(n.sons[0]) + lcomma(n, 1) + len("enum_")
@@ -751,8 +753,7 @@ proc doParamsAux(g: var TSrcGen, params: PNode) =
 
 proc gsub(g: var TSrcGen, n: PNode, c: TContext) = 
   if isNil(n): return
-  var 
-    L: int
+  var
     a: TContext
   if n.comment != nil: pushCom(g, n)
   case n.kind                 # atoms:
@@ -778,7 +779,7 @@ proc gsub(g: var TSrcGen, n: PNode, c: TContext) =
   of nkRStrLit: put(g, tkRStrLit, atom(n))
   of nkCharLit: put(g, tkCharLit, atom(n))
   of nkNilLit: put(g, tkNil, atom(n))    # complex expressions
-  of nkCall, nkConv, nkDotCall, nkPattern:
+  of nkCall, nkConv, nkDotCall, nkPattern, nkObjConstr:
     if sonsLen(n) >= 1: gsub(g, n.sons[0])
     put(g, tkParLe, "(")
     gcomma(g, n, 1)
@@ -1025,7 +1026,20 @@ proc gsub(g: var TSrcGen, n: PNode, c: TContext) =
       gsub(g, n.sons[1])
     else:
       put(g, tkProc, "proc")
-  of nkEnumTy: 
+  of nkIteratorTy:
+    if sonsLen(n) > 0:
+      putWithSpace(g, tkIterator, "iterator")
+      gsub(g, n.sons[0])
+      gsub(g, n.sons[1])
+    else:
+      put(g, tkIterator, "iterator")
+  of nkSharedTy:
+    if sonsLen(n) > 0:
+      putWithSpace(g, tkShared, "shared")
+      gsub(g, n.sons[0])
+    else:
+      put(g, tkShared, "shared")
+  of nkEnumTy:
     if sonsLen(n) > 0:
       putWithSpace(g, tkEnum, "enum")
       gsub(g, n.sons[0])
@@ -1081,7 +1095,7 @@ proc gsub(g: var TSrcGen, n: PNode, c: TContext) =
     incl(a.flags, rfInConstExpr)
     gsection(g, n, a, tkConst, "const")
   of nkVarSection, nkLetSection:
-    L = sonsLen(n)
+    var L = sonsLen(n)
     if L == 0: return
     if n.kind == nkVarSection: putWithSpace(g, tkVar, "var")
     else: putWithSpace(g, tkLet, "let")
@@ -1119,12 +1133,26 @@ proc gsub(g: var TSrcGen, n: PNode, c: TContext) =
       put(g, tkCurlyDotLe, "{.")
       gcomma(g, n, emptyContext)
       put(g, tkCurlyDotRi, ".}")
-  of nkImportStmt: 
-    putWithSpace(g, tkImport, "import")
+  of nkImportStmt, nkExportStmt:
+    if n.kind == nkImportStmt:
+      putWithSpace(g, tkImport, "import")
+    else:
+      putWithSpace(g, tkExport, "export")
     gcoms(g)
     indentNL(g)
     gcommaAux(g, n, g.indent)
     dedent(g)
+    putNL(g)
+  of nkImportExceptStmt, nkExportExceptStmt:
+    if n.kind == nkImportExceptStmt:
+      putWithSpace(g, tkImport, "import")
+    else:
+      putWithSpace(g, tkExport, "export")
+    gsub(g, n.sons[0])
+    put(g, tkSpaces, Space)
+    putWithSpace(g, tkExcept, "except")
+    gcommaAux(g, n, g.indent, 1)
+    gcoms(g)
     putNL(g)
   of nkFromStmt: 
     putWithSpace(g, tkFrom, "from")

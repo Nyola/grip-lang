@@ -1,7 +1,7 @@
 #
 #
 #           The Nimrod Compiler
-#        (c) Copyright 2012 Andreas Rumpf
+#        (c) Copyright 2013 Andreas Rumpf
 #
 #    See the file "copying.txt", included in this
 #    distribution, for details about the copyright.
@@ -10,7 +10,8 @@
 ## This module implements code generation for multi methods.
 
 import 
-  intsets, options, ast, astalgo, msgs, idents, renderer, types, magicsys
+  intsets, options, ast, astalgo, msgs, idents, renderer, types, magicsys,
+  sempass2
 
 proc genConv(n: PNode, d: PType, downcast: bool): PNode = 
   var dest = skipTypes(d, abstractPtrs)
@@ -64,10 +65,10 @@ proc sameMethodBucket(a, b: PSym): bool =
         break 
     if sameType(aa, bb) or
         (aa.kind == tyObject) and (bb.kind == tyObject) and
-        (inheritanceDiff(bb, aa) < 0): 
+        (inheritanceDiff(bb, aa) < 0):
       nil
-    else: 
-      return 
+    else:
+      return
   result = true
 
 proc attachDispatcher(s: PSym, dispatcher: PNode) =
@@ -81,10 +82,12 @@ proc attachDispatcher(s: PSym, dispatcher: PNode) =
 
 proc methodDef*(s: PSym, fromCache: bool) =
   var L = len(gMethods)
-  for i in countup(0, L - 1): 
-    if sameMethodBucket(gMethods[i][0], s): 
+  for i in countup(0, L - 1):
+    let disp = gMethods[i][0]
+    if sameMethodBucket(disp, s):
       add(gMethods[i], s)
-      attachDispatcher(s, lastSon(gMethods[i][0].ast))
+      attachDispatcher(s, lastSon(disp.ast))
+      when useEffectSystem: checkMethodEffects(disp, s)
       return 
   add(gMethods, @[s])
   # create a new dispatcher:
@@ -103,17 +106,16 @@ proc methodDef*(s: PSym, fromCache: bool) =
     # attach to itself to prevent bugs:
     attachDispatcher(disp, newSymNode(disp))
 
-proc relevantCol(methods: TSymSeq, col: int): bool = 
+proc relevantCol(methods: TSymSeq, col: int): bool =
   # returns true iff the position is relevant
-  var t = methods[0].typ.sons[col]
-  result = false
-  if skipTypes(t, skipPtrs).kind == tyObject: 
-    for i in countup(1, high(methods)): 
-      if not SameType(methods[i].typ.sons[col], t): 
+  var t = methods[0].typ.sons[col].skipTypes(skipPtrs)
+  if t.kind == tyObject:
+    for i in countup(1, high(methods)):
+      let t2 = skipTypes(methods[i].typ.sons[col], skipPtrs)
+      if not SameType(t2, t):
         return true
   
 proc cmpSignatures(a, b: PSym, relevantCols: TIntSet): int = 
-  result = 0
   for col in countup(1, sonsLen(a.typ) - 1): 
     if Contains(relevantCols, col): 
       var aa = skipTypes(a.typ.sons[col], skipPtrs)

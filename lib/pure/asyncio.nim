@@ -8,7 +8,8 @@
 
 import sockets, os
 
-## This module implements an asynchronous event loop for sockets. 
+## This module implements an asynchronous event loop together with asynchronous sockets
+## which use this event loop.
 ## It is akin to Python's asyncore module. Many modules that use sockets
 ## have an implementation for this module, those modules should all have a 
 ## ``register`` function which you should use to add the desired objects to a 
@@ -34,6 +35,9 @@ import sockets, os
 ## use the ``TDelegate`` object, instead use ``PAsyncSocket``. It is possible 
 ## that in the future this type's fields will not be exported therefore breaking
 ## your code.
+##
+## **Warning:** The API of this module is unstable, and therefore is subject
+## to change.
 ##
 ## Asynchronous sockets
 ## ====================
@@ -122,7 +126,8 @@ type
 
     handleTask*: proc (s: PAsyncSocket) {.closure.}
 
-    lineBuffer: TaintedString ## Temporary storage for ``recvLine``
+    lineBuffer: TaintedString ## Temporary storage for ``readLine``
+    sendBuffer: string ## Temporary storage for ``send``
     sslNeedAccept: bool
     proto: TProtocol
     deleg: PDelegate
@@ -152,6 +157,7 @@ proc newAsyncSocket(): PAsyncSocket =
   result.handleTask = (proc (s: PAsyncSocket) = nil)
 
   result.lineBuffer = "".TaintedString
+  result.sendBuffer = ""
 
 proc AsyncSocket*(domain: TDomain = AF_INET, typ: TType = SOCK_STREAM, 
                   protocol: TProtocol = IPPROTO_TCP, 
@@ -202,8 +208,8 @@ proc asyncSockHandleRead(h: PObject) =
       return
 
   if PAsyncSocket(h).info != SockListening:
-    assert PAsyncSocket(h).info != SockConnecting
-    PAsyncSocket(h).handleRead(PAsyncSocket(h))
+    if PAsyncSocket(h).info != SockConnecting:
+      PAsyncSocket(h).handleRead(PAsyncSocket(h))
   else:
     PAsyncSocket(h).handleAccept(PAsyncSocket(h))
 
@@ -222,10 +228,22 @@ proc asyncSockHandleWrite(h: PObject) =
     else:
       PAsyncSocket(h).deleg.mode = fmReadWrite
   else:
-    if PAsyncSocket(h).handleWrite != nil:
-      PAsyncSocket(h).handleWrite(PAsyncSocket(h))
+    if PAsyncSocket(h).sendBuffer != "":
+      let sock = PAsyncSocket(h)
+      let bytesSent = sock.socket.sendAsync(sock.sendBuffer)
+      assert bytesSent > 0
+      if bytesSent != sock.sendBuffer.len:
+        sock.sendBuffer = sock.sendBuffer[bytesSent .. -1]
+      elif bytesSent == sock.sendBuffer.len:
+        sock.sendBuffer = ""
+      
+      if PAsyncSocket(h).handleWrite != nil:
+        PAsyncSocket(h).handleWrite(PAsyncSocket(h))
     else:
-      PAsyncSocket(h).deleg.mode = fmRead
+      if PAsyncSocket(h).handleWrite != nil:
+        PAsyncSocket(h).handleWrite(PAsyncSocket(h))
+      else:
+        PAsyncSocket(h).deleg.mode = fmRead
 
 when defined(ssl):
   proc asyncSockDoHandshake(h: PObject) =
@@ -337,7 +355,8 @@ proc acceptAddr*(server: PAsyncSocket, client: var PAsyncSocket,
   # deleg.open is set in ``toDelegate``.
   
   client.socket = c
-  client.lineBuffer = ""
+  client.lineBuffer = "".TaintedString
+  client.sendBuffer = ""
   client.info = SockConnected
 
 proc accept*(server: PAsyncSocket, client: var PAsyncSocket) =
@@ -417,11 +436,18 @@ proc delHandleWrite*(s: PAsyncSocket) =
   ## Removes the ``handleWrite`` event handler on ``s``.
   s.handleWrite = nil
 
-proc recvLine*(s: PAsyncSocket, line: var TaintedString): bool =
+{.push warning[deprecated]: off.}
+proc recvLine*(s: PAsyncSocket, line: var TaintedString): bool {.deprecated.} =
   ## Behaves similar to ``sockets.recvLine``, however it handles non-blocking
   ## sockets properly. This function guarantees that ``line`` is a full line,
   ## if this function can only retrieve some data; it will save this data and
   ## add it to the result when a full line is retrieved.
+  ##
+  ## Unlike ``sockets.recvLine`` this function will raise an EOS or ESSL
+  ## exception if an error occurs.
+  ##
+  ## **Deprecated since version 0.9.2**: This function has been deprecated in
+  ## favour of readLine.
   setLen(line.string, 0)
   var dataReceived = "".TaintedString
   var ret = s.socket.recvLineAsync(dataReceived)
@@ -440,7 +466,59 @@ proc recvLine*(s: PAsyncSocket, line: var TaintedString): bool =
   of RecvDisconnected:
     result = true
   of RecvFail:
+    s.SocketError(async = true)
     result = false
+{.pop.}
+
+proc readLine*(s: PAsyncSocket, line: var TaintedString): bool =
+  ## Behaves similar to ``sockets.readLine``, however it handles non-blocking
+  ## sockets properly. This function guarantees that ``line`` is a full line,
+  ## if this function can only retrieve some data; it will save this data and
+  ## add it to the result when a full line is retrieved, when this happens
+  ## False will be returned. True will only be returned if a full line has been
+  ## retrieved or the socket has been disconnected in which case ``line`` will
+  ## be set to "".
+  ##
+  ## This function will raise an EOS exception when a socket error occurs.
+  setLen(line.string, 0)
+  var dataReceived = "".TaintedString
+  var ret = s.socket.readLineAsync(dataReceived)
+  case ret
+  of ReadFullLine:
+    if s.lineBuffer.len > 0:
+      string(line).add(s.lineBuffer.string)
+      setLen(s.lineBuffer.string, 0)
+    string(line).add(dataReceived.string)
+    if string(line) == "":
+      line = "\c\L".TaintedString
+    result = true
+  of ReadPartialLine:
+    string(s.lineBuffer).add(dataReceived.string)
+    result = false
+  of ReadNone:
+    result = false
+  of ReadDisconnected:
+    result = true
+
+proc send*(sock: PAsyncSocket, data: string) =
+  ## Sends ``data`` to socket ``sock``. This is basically a nicer implementation
+  ## of ``sockets.sendAsync``.
+  ##
+  ## If ``data`` cannot be sent immediately it will be buffered and sent
+  ## when ``sock`` becomes writeable (during the ``handleWrite`` event).
+  ## It's possible that only a part of ``data`` will be sent immediately, while
+  ## the rest of it will be buffered and sent later.
+  if sock.sendBuffer.len != 0:
+    sock.sendBuffer.add(data)
+    return
+  let bytesSent = sock.socket.sendAsync(data)
+  assert bytesSent >= 0
+  if bytesSent == 0:
+    sock.sendBuffer.add(data)
+    sock.deleg.mode = fmReadWrite
+  elif bytesSent != data.len:
+    sock.sendBuffer.add(data[bytesSent .. -1])
+    sock.deleg.mode = fmReadWrite
 
 proc timeValFromMilliseconds(timeout = 500): TTimeVal =
   if timeout != -1:
@@ -556,7 +634,9 @@ when isMainModule:
   
   proc testRead(s: PAsyncSocket, no: int) =
     echo("Reading! " & $no)
-    var data = s.getSocket.recv()
+    var data = ""
+    if not s.readLine(data):
+      OSError()
     if data == "":
       echo("Closing connection. " & $no)
       s.close()

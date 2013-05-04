@@ -1,7 +1,7 @@
 /*
 
             Nimrod's Runtime Library
-        (c) Copyright 2012 Andreas Rumpf
+        (c) Copyright 2013 Andreas Rumpf
 
     See the file "copying.txt", included in this
     distribution, for details about the copyright.
@@ -143,7 +143,7 @@ __clang__
 #define N_NOINLINE_PTR(rettype, name) rettype (*name)
 
 #if defined(__BORLANDC__) || defined(__WATCOMC__) || \
-    defined(__POCC__) || defined(_MSC_VER)
+    defined(__POCC__) || defined(_MSC_VER) || defined(WIN32) || defined(_WIN32)
 /* these compilers have a fastcall so use it: */
 #  define N_NIMCALL(rettype, name) rettype __fastcall name
 #  define N_NIMCALL_PTR(rettype, name) rettype (__fastcall *name)
@@ -436,6 +436,17 @@ struct TFrame {
   NI len;
 };
 
+#define nimfr(proc, file) \
+  volatile TFrame F; \
+  F.procname = proc; F.filename = file; F.line = 0; F.len = 0; nimFrame(&F);
+
+#define nimfrs(proc, file, slots, length) \
+  volatile struct {TFrame* prev;NCSTRING procname;NI line;NCSTRING filename; NI len; TVarSlot s[slots];} F; \
+  F.procname = proc; F.filename = file; F.line = 0; F.len = length; nimFrame((TFrame*)&F);
+
+#define nimln(n, file) \
+  F.line = n; F.filename = file;
+
 #define NIM_POSIX_INIT  __attribute__((constructor)) 
 
 #if defined(_MSCVER) && defined(__i386__)
@@ -470,4 +481,6 @@ static inline void GCGuard (void *ptr) { asm volatile ("" :: "X" (ptr)); }
 #  define GC_GUARD
 #endif
 
+typedef int assert_numbits[sizeof(NI) == sizeof(void*) &&
+                           NIM_INTBITS == sizeof(NI)*8 ? 1 : -1];
 #endif

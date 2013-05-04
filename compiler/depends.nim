@@ -12,13 +12,11 @@
 import 
   os, options, ast, astalgo, msgs, ropes, idents, passes, importer
 
-proc genDependPass*(): TPass
 proc generateDot*(project: string)
 
 type 
   TGen = object of TPassContext
     module*: PSym
-    filename*: string
   PGen = ref TGen
 
 var gDotGraph: PRope # the generated DOT file; we need a global variable
@@ -35,7 +33,7 @@ proc addDotDependency(c: PPassContext, n: PNode): PNode =
     for i in countup(0, sonsLen(n) - 1): 
       var imported = getModuleName(n.sons[i])
       addDependencyAux(g.module.name.s, imported)
-  of nkFromStmt: 
+  of nkFromStmt, nkImportExceptStmt: 
     var imported = getModuleName(n.sons[0])
     addDependencyAux(g.module.name.s, imported)
   of nkStmtList, nkBlockStmt, nkStmtListExpr, nkBlockExpr: 
@@ -48,14 +46,11 @@ proc generateDot(project: string) =
       toRope(changeFileExt(extractFileName(project), "")), gDotGraph]), 
             changeFileExt(project, "dot"))
 
-proc myOpen(module: PSym, filename: string): PPassContext = 
+proc myOpen(module: PSym): PPassContext =
   var g: PGen
   new(g)
   g.module = module
-  g.filename = filename
   result = g
 
-proc gendependPass(): TPass = 
-  initPass(result)
-  result.open = myOpen
-  result.process = addDotDependency
+const gendependPass* = makePass(open = myOpen, process = addDotDependency)
+

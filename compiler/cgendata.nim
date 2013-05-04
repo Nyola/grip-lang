@@ -54,9 +54,10 @@ type
     id*: int                  # the ID of the label; positive means that it
     label*: PRope             # generated text for the label
                               # nil if label is not used
-    nestedTryStmts*: int      # how many try statements is it nested into
     sections*: TCProcSections # the code beloging
     isLoop*: bool             # whether block is a loop
+    nestedTryStmts*: int16    # how many try statements is it nested into
+    frameLen*: int16
   
   TCProc{.final.} = object    # represents C proc that is currently generated
     prc*: PSym                # the Nimrod proc that this C proc belongs to
@@ -74,9 +75,7 @@ type
     options*: TOptions        # options that should be used for code
                               # generation; this is the same as prc.options
                               # unless prc == nil
-    frameLen*: int            # current length of frame descriptor
-    sendClosure*: PType       # closure record type that we pass
-    receiveClosure*: PType    # closure record type that we get
+    maxFrameLen*: int         # max length of frame descriptor
     module*: BModule          # used to prevent excessive parameter passing
     withinLoop*: int          # > 0 if we are within a loop
     gcFrameId*: natural       # for the GC stack marking
@@ -111,12 +110,12 @@ type
     typeNodes*, nimTypes*: int # used for type info generation
     typeNodesName*, nimTypesName*: PRope # used for type info generation
     labels*: natural          # for generating unique module-scope names
+    extensionLoaders*: array['0'..'9', PRope] # special procs for the
+                                              # OpenGL wrapper
 
 var
   mainModProcs*, mainModInit*, mainDatInit*: PRope # parts of the main module
   gMapping*: PRope             # the generated mapping file (if requested)
-  gPendingModules*: seq[BModule] = @[] # list of modules that are not
-                                       # finished with code generation
   gModules*: seq[BModule] = @[] # list of all compiled modules
   gForwardedProcsCounter*: int = 0
 
@@ -140,4 +139,11 @@ proc newProc*(prc: PSym, module: BModule): BProc =
   else: result.options = gOptions
   newSeq(result.blocks, 1)
   result.nestedTryStmts = @[]
+
+iterator cgenModules*: var BModule =
+  for i in 0..high(gModules):
+    # ultimately, we are iterating over the file ids here.
+    # some "files" won't have an associated cgen module (like stdin)
+    # and we must skip over them.
+    if gModules[i] != nil: yield gModules[i]
 

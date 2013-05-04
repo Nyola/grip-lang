@@ -70,15 +70,18 @@ exprOrType ::= lowestExpr
             | 'tuple' tupleDesc
 
 expr ::= exprOrType
-     | 'proc' paramList [pragma] ['=' stmt] 
+     | 'proc' paramList [pragma] ['=' stmt]
+     | 'iterator' paramList [pragma] ['=' stmt]
 
 exprList ::= [expr (comma expr)* [comma]]
 
 
 qualifiedIdent ::= symbol ['.' symbol]
 
-typeDesc ::= exprOrType
+typeDesc ::= (exprOrType
          | 'proc' paramList [pragma]
+         | 'iterator' paramList [pragma] ) 
+           ['not' expr]  # for now only 'not nil' suffix is supported
 
 macroStmt ::= ':' [stmt] ('of' [exprList] ':' stmt
                          |'elif' expr ':' stmt
@@ -146,7 +149,7 @@ param ::= symbol (comma symbol)* (':' typeDesc ['=' expr] | '=' expr)
 paramList ::= ['(' [param (comma|semicolon param)*] optPar ')'] [':' typeDesc]
 
 genericConstraint ::= 'object' | 'tuple' | 'enum' | 'proc' | 'ref' | 'ptr' 
-                    | 'var' | 'distinct' | primary
+                    | 'var' | 'distinct' | 'iterator' | primary
 genericConstraints ::= genericConstraint ( '|' optInd genericConstraint )*
 
 genericParam ::= symbol [':' genericConstraints] ['=' expr]

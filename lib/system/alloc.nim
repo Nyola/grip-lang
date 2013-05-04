@@ -17,8 +17,9 @@
 
 # some platforms have really weird unmap behaviour: unmap(blockStart, PageSize)
 # really frees the whole block. Happens for Linux/PowerPC for example. Amd64
-# and x86 are safe though:
-const weirdUnmap = not (defined(amd64) or defined(i386))
+# and x86 are safe though; Windows is special because MEM_RELEASE can only be
+# used with a size of 0:
+const weirdUnmap = not (defined(amd64) or defined(i386)) or defined(windows)
 
 when defined(posix): 
   const
@@ -75,7 +76,10 @@ elif defined(windows):
     # This means that the OS has some different view over how big the block is
     # that we want to free! So, we cannot reliably release the memory back to
     # Windows :-(. We have to live with MEM_DECOMMIT instead.
-    when reallyOsDealloc: VirtualFree(p, size, MEM_DECOMMIT)
+    # Well that used to be the case but MEM_DECOMMIT fragments the address
+    # space heavily, so we now treat Windows as a strange unmap target.
+    when reallyOsDealloc: VirtualFree(p, 0, MEM_RELEASE)
+    #VirtualFree(p, size, MEM_DECOMMIT)
 
 else: 
   {.error: "Port memory manager to your platform".}
@@ -299,7 +303,35 @@ iterator elements(t: TIntSet): int {.inline.} =
           w = w shr 1
         inc(i)
       r = r.next
-   
+  
+proc isSmallChunk(c: PChunk): bool {.inline.} = 
+  return c.size <= SmallChunkSize-smallChunkOverhead()
+  
+proc chunkUnused(c: PChunk): bool {.inline.} = 
+  result = not c.used
+
+iterator allObjects(m: TMemRegion): pointer {.inline.} =
+  for s in elements(m.chunkStarts):
+    # we need to check here again as it could have been modified:
+    if s in m.chunkStarts:
+      let c = cast[PChunk](s shl PageShift)
+      if not chunkUnused(c):
+        if isSmallChunk(c):
+          var c = cast[PSmallChunk](c)
+          
+          let size = c.size
+          var a = cast[TAddress](addr(c.data))
+          let limit = a + c.acc
+          while a <% limit:
+            yield cast[pointer](a)
+            a = a +% size
+        else:
+          let c = cast[PBigChunk](c)
+          yield addr(c.data)
+
+proc isCell(p: pointer): bool {.inline.} =
+  result = cast[ptr TFreeCell](p).zeroField >% 1
+
 # ------------- chunk management ----------------------------------------------
 proc pageIndex(c: PChunk): int {.inline.} = 
   result = cast[TAddress](c) shr PageShift
@@ -393,12 +425,6 @@ proc ListRemove[T](head: var T, c: T) {.inline.} =
     if c.next != nil: c.next.prev = c.prev
   c.next = nil
   c.prev = nil
-  
-proc isSmallChunk(c: PChunk): bool {.inline.} = 
-  return c.size <= SmallChunkSize-smallChunkOverhead()
-  
-proc chunkUnused(c: PChunk): bool {.inline.} = 
-  result = not c.used
   
 proc updatePrevSize(a: var TMemRegion, c: PBigChunk, 
                     prevSize: int) {.inline.} = 
@@ -549,7 +575,7 @@ proc rawAlloc(a: var TMemRegion, requestedSize: int): pointer =
       sysAssert(allocInv(a), "rawAlloc: before listRemove test")
       ListRemove(a.freeSmallChunks[s], c)
       sysAssert(allocInv(a), "rawAlloc: end listRemove test")
-    sysAssert(((cast[TAddress](result) and PageMask) -% smallChunkOverhead()) %%
+    sysAssert(((cast[TAddress](result) and PageMask) - smallChunkOverhead()) %%
                size == 0, "rawAlloc 21")
     sysAssert(allocInv(a), "rawAlloc: end small size")
   else:
@@ -578,7 +604,7 @@ proc rawDealloc(a: var TMemRegion, p: pointer) =
     # `p` is within a small chunk:
     var c = cast[PSmallChunk](c)
     var s = c.size
-    sysAssert(((cast[TAddress](p) and PageMask) -% smallChunkOverhead()) %%
+    sysAssert(((cast[TAddress](p) and PageMask) - smallChunkOverhead()) %%
                s == 0, "rawDealloc 3")
     var f = cast[ptr TFreeCell](p)
     #echo("setting to nil: ", $cast[TAddress](addr(f.zeroField)))
@@ -601,7 +627,7 @@ proc rawDealloc(a: var TMemRegion, p: pointer) =
         ListRemove(a.freeSmallChunks[s div memAlign], c)
         c.size = SmallChunkSize
         freeBigChunk(a, cast[PBigChunk](c))
-    sysAssert(((cast[TAddress](p) and PageMask) -% smallChunkOverhead()) %%
+    sysAssert(((cast[TAddress](p) and PageMask) - smallChunkOverhead()) %%
                s == 0, "rawDealloc 2")
   else:
     # set to 0xff to check for usage after free bugs:

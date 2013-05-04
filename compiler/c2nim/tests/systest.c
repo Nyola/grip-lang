@@ -9,6 +9,20 @@ extern "C" {
 #  endif
 #endif
 
+enum
+{
+/* 8bit, color or not */
+    CV_LOAD_IMAGE_UNCHANGED  =-1,
+/* 8bit, gray */
+    CV_LOAD_IMAGE_GRAYSCALE  =0,
+/* ?, color */
+    CV_LOAD_IMAGE_COLOR      =1,
+/* any depth, ? */
+    CV_LOAD_IMAGE_ANYDEPTH   =2,
+/* ?, any color */
+    CV_LOAD_IMAGE_ANYCOLOR   =4
+};
+
 typedef void (*callback_t) (int rc);
 typedef const char* (*callback2)(int rc, long L, const char* buffer);
 
@@ -16,6 +30,8 @@ int   aw_callback_set (AW_CALLBACK c, callback_t callback );
 int   aw_instance_callback_set (AW_CALLBACK c, callback_t callback);
 
 unsigned long int wawa;
+
+#define MAX(x, y) ((x) < (y)? (y) : (x))
 
 #define AW_BUILD 85 // AW 5.0
 // Limits

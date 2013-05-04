@@ -17,38 +17,33 @@ type
   TGen = object of TPassContext
     doc: PDoc
     module: PSym
-    filename: string
   PGen = ref TGen
 
 proc close(p: PPassContext, n: PNode): PNode =
   var g = PGen(p)
   let useWarning = sfMainModule notin g.module.flags
-  writeOutput(g.doc, g.filename, HtmlExt, useWarning)
-  try:
-    generateIndex(g.doc)
-  except EIO:
-    nil
+  if gWholeProject or sfMainModule in g.module.flags:
+    writeOutput(g.doc, g.module.filename, HtmlExt, useWarning)
+    try:
+      generateIndex(g.doc)
+    except EIO:
+      nil
 
 proc processNode(c: PPassContext, n: PNode): PNode = 
   result = n
   var g = PGen(c)
   generateDoc(g.doc, n)
 
-proc myOpen(module: PSym, filename: string): PPassContext = 
+proc myOpen(module: PSym): PPassContext = 
   var g: PGen
   new(g)
   g.module = module
-  g.filename = filename
-  var d = newDocumentor(filename, options.gConfigVars)
+  var d = newDocumentor(module.filename, options.gConfigVars)
   d.hasToc = true
   g.doc = d
   result = g
 
-proc docgen2Pass*(): TPass = 
-  initPass(result)
-  result.open = myOpen
-  result.process = processNode
-  result.close = close
+const docgen2Pass* = makePass(open = myOpen, process = processNode, close = close)
 
 proc finishDoc2Pass*(project: string) = 
   nil

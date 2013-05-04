@@ -23,14 +23,15 @@ type
                                ## here shouldn't be used directly. They are
                                ## accessible so that a stream implementation
                                ## can override them.
-    closeImpl*: proc (s: PStream) {.nimcall.}
-    atEndImpl*: proc (s: PStream): bool {.nimcall.}
-    setPositionImpl*: proc (s: PStream, pos: int) {.nimcall.}
-    getPositionImpl*: proc (s: PStream): int {.nimcall.}
+    closeImpl*: proc (s: PStream) {.nimcall, tags: [].}
+    atEndImpl*: proc (s: PStream): bool {.nimcall, tags: [].}
+    setPositionImpl*: proc (s: PStream, pos: int) {.nimcall, tags: [].}
+    getPositionImpl*: proc (s: PStream): int {.nimcall, tags: [].}
     readDataImpl*: proc (s: PStream, buffer: pointer,
-                         bufLen: int): int {.nimcall.}
-    writeDataImpl*: proc (s: PStream, buffer: pointer, bufLen: int) {.nimcall.}
-    flushImpl*: proc (s: PStream) {.nimcall.}
+                         bufLen: int): int {.nimcall, tags: [FReadIO].}
+    writeDataImpl*: proc (s: PStream, buffer: pointer, bufLen: int) {.nimcall,
+      tags: [FWriteIO].}
+    flushImpl*: proc (s: PStream) {.nimcall, tags: [FWriteIO].}
 
 proc flush*(s: PStream) =
   ## flushes the buffers that the stream `s` might use.
@@ -104,6 +105,12 @@ proc write*(s: PStream, x: string) =
   ## writes the string `x` to the the stream `s`. No length field or 
   ## terminating zero is written.
   writeData(s, cstring(x), x.len)
+
+proc writeln*(s: PStream, args: varargs[string, `$`]) =
+  ## writes one or more strings to the the stream `s` followed
+  ## by a new line. No length field or terminating zero is written.
+  for str in args: write(s, str)
+  write(s, "\n")
 
 proc read[T](s: PStream, result: var T) = 
   ## generic read procedure. Reads `result` from the stream `s`.
@@ -179,8 +186,10 @@ proc readLine*(s: PStream): TaintedString =
     if c == '\c': 
       c = readChar(s)
       break
-    elif c == '\L' or c == '\0': break
-    result.string.add(c)
+    if c == '\L' or c == '\0':
+      break
+    else:
+      result.string.add(c)
 
 type
   PStringStream* = ref TStringStream ## a stream that encapsulates a string
@@ -235,7 +244,10 @@ type
   TFileStream* = object of TStream
     f: TFile
 
-proc fsClose(s: PStream) = close(PFileStream(s).f)
+proc fsClose(s: PStream) =
+  if PFileStream(s).f != nil:
+    close(PFileStream(s).f)
+    PFileStream(s).f = nil
 proc fsFlush(s: PStream) = flushFile(PFileStream(s).f)
 proc fsAtEnd(s: PStream): bool = return EndOfFile(PFileStream(s).f)
 proc fsSetPosition(s: PStream, pos: int) = setFilePos(PFileStream(s).f, pos)
@@ -262,7 +274,8 @@ proc newFileStream*(f: TFile): PFileStream =
 
 proc newFileStream*(filename: string, mode: TFileMode): PFileStream = 
   ## creates a new stream from the file named `filename` with the mode `mode`.
-  ## If the file cannot be opened, nil is returned.
+  ## If the file cannot be opened, nil is returned. See the `system
+  ## <system.html>`_ module for a list of available TFileMode enums.
   var f: TFile
   if Open(f, filename, mode): result = newFileStream(f)
 

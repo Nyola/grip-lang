@@ -15,7 +15,6 @@ import
   intsets, os, options, strutils, nversion, ast, astalgo, msgs, platform,
   condsyms, ropes, idents, crc, rodread, passes, importer, idgen, rodutils
 
-proc rodwritePass*(): TPass
 # implementation
 
 type 
@@ -32,14 +31,13 @@ type
     converters, methods: string
     init: string
     data: string
-    filename: string
     sstack: TSymSeq          # a stack of symbols to process
     tstack: TTypeSeq         # a stack of types to process
     files: TStringSeq
 
   PRodWriter = ref TRodWriter
 
-proc newRodWriter(modfilename: string, crc: TCrc32, module: PSym): PRodWriter
+proc newRodWriter(crc: TCrc32, module: PSym): PRodWriter
 proc addModDep(w: PRodWriter, dep: string)
 proc addInclDep(w: PRodWriter, dep: string)
 proc addInterfaceSym(w: PRodWriter, s: PSym)
@@ -64,7 +62,10 @@ proc fileIdx(w: PRodWriter, filename: string): int =
   setlen(w.files, result + 1)
   w.files[result] = filename
 
-proc newRodWriter(modfilename: string, crc: TCrc32, module: PSym): PRodWriter = 
+template filename*(w: PRodWriter): string =
+  w.module.filename
+
+proc newRodWriter(crc: TCrc32, module: PSym): PRodWriter = 
   new(result)
   result.sstack = @[]
   result.tstack = @[]
@@ -72,7 +73,6 @@ proc newRodWriter(modfilename: string, crc: TCrc32, module: PSym): PRodWriter =
   InitIITable(result.imports.tab)
   result.index.r = ""
   result.imports.r = ""
-  result.filename = modfilename
   result.crc = crc
   result.module = module
   result.defines = getDefines()
@@ -205,6 +205,9 @@ proc encodeType(w: PRodWriter, t: PType, result: var string) =
     return
   # we need no surrounding [] here because the type is in a line of its own
   if t.kind == tyForward: InternalError("encodeType: tyForward")
+  # for the new rodfile viewer we use a preceeding [ so that the data section
+  # can easily be disambiguated:
+  add(result, '[')
   encodeVInt(ord(t.kind), result)
   add(result, '+')
   encodeVInt(t.id, result)
@@ -230,12 +233,6 @@ proc encodeType(w: PRodWriter, t: PType, result: var string) =
   if t.align != 2: 
     add(result, '=')
     encodeVInt(t.align, result)
-  if t.containerID != 0: 
-    add(result, '@')
-    encodeVInt(t.containerID, result)
-  if t.constraint != nil:
-    add(result, '`')
-    encodeNode(w, UnknownLineInfo(), t.constraint, result)
   encodeLoc(w, t.loc, result)
   for i in countup(0, sonsLen(t) - 1): 
     if t.sons[i] == nil: 
@@ -295,6 +292,9 @@ proc encodeSym(w: PRodWriter, s: PSym, result: var string) =
     encodeVInt(s.offset, result)
   encodeLoc(w, s.loc, result)
   if s.annex != nil: encodeLib(w, s.annex, s.info, result)
+  if s.constraint != nil:
+    add(result, '#')
+    encodeNode(w, UnknownLineInfo(), s.constraint, result)
   # lazy loading will soon reload the ast lazily, so the ast needs to be
   # the last entry of a symbol:
   if s.ast != nil:
@@ -571,9 +571,9 @@ proc process(c: PPassContext, n: PNode): PNode =
   else: 
     nil
 
-proc myOpen(module: PSym, filename: string): PPassContext =
+proc myOpen(module: PSym): PPassContext =
   if module.id < 0: InternalError("rodwrite: module ID not set")
-  var w = newRodWriter(filename, rodread.GetCRC(module.info.toFullPath), module)
+  var w = newRodWriter(module.fileIdx.GetCRC, module)
   rawAddInterfaceSym(w, module)
   result = w
 
@@ -583,10 +583,5 @@ proc myClose(c: PPassContext, n: PNode): PNode =
   writeRod(w)
   idgen.saveMaxIds(options.gProjectPath / options.gProjectName)
 
-proc rodwritePass(): TPass = 
-  initPass(result)
-  if optSymbolFiles in gGlobalOptions: 
-    result.open = myOpen
-    result.close = myClose
-    result.process = process
+const rodwritePass* = makePass(open = myOpen, close = myClose, process = process)
 

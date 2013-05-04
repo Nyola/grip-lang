@@ -1,7 +1,7 @@
 #
 #
 #           The Nimrod Compiler
-#        (c) Copyright 2012 Andreas Rumpf
+#        (c) Copyright 2013 Andreas Rumpf
 #
 #    See the file "copying.txt", included in this
 #    distribution, for details about the copyright.
@@ -379,38 +379,20 @@ proc toObjFile*(filenameWithoutExt: string): string =
   # Object file for compilation
   result = changeFileExt(filenameWithoutExt, cc[ccompiler].objExt)
 
-proc addFileToCompile*(filename: string) = 
+proc addFileToCompile*(filename: string) =
   appendStr(toCompile, filename)
 
-proc footprint(filename: string): TCrc32 =
-  result = crcFromFile(filename) >< 
-      platform.OS[targetOS].name ><
-      platform.CPU[targetCPU].name ><
-      extccomp.CC[extccomp.ccompiler].name
+proc resetCompilationLists* =
+  initLinkedList(toCompile)
+  ## XXX: we must associate these with their originating module
+  # when the module is loaded/unloaded it adds/removes its items
+  # That's because we still need to CRC check the external files
+  # Maybe we can do that in checkDep on the other hand?
+  initLinkedList(externalToCompile)
+  initLinkedList(toLink)
 
-proc externalFileChanged(filename: string): bool = 
-  var crcFile = toGeneratedFile(filename, "crc")
-  var currentCrc = int(footprint(filename))
-  var f: TFile
-  if open(f, crcFile, fmRead): 
-    var line = newStringOfCap(40)
-    if not f.readLine(line): line = "0"
-    close(f)
-    var oldCrc = parseInt(line)
-    result = oldCrc != currentCrc
-  else:
-    result = true
-  if result: 
-    if open(f, crcFile, fmWrite):
-      f.writeln($currentCrc)
-      close(f)
-
-proc addExternalFileToCompile*(filename: string) = 
-  if optForceFullMake in gGlobalOptions or externalFileChanged(filename):
-    appendStr(externalToCompile, filename)
-
-proc addFileToLink*(filename: string) = 
-  prependStr(toLink, filename) 
+proc addFileToLink*(filename: string) =
+  prependStr(toLink, filename)
   # BUGFIX: was ``appendStr``
 
 proc execExternalProgram*(cmd: string) = 
@@ -527,6 +509,34 @@ proc getCompileCFileCmd*(cfilename: string, isExternal = false): string =
     "nimrod", quoteIfContainsWhite(getPrefixDir()), 
     "lib", quoteIfContainsWhite(libpath)])
 
+proc footprint(filename: string): TCrc32 =
+  result = crcFromFile(filename) ><
+      platform.OS[targetOS].name ><
+      platform.CPU[targetCPU].name ><
+      extccomp.CC[extccomp.ccompiler].name ><
+      getCompileCFileCmd(filename, true)
+
+proc externalFileChanged(filename: string): bool = 
+  var crcFile = toGeneratedFile(filename, "crc")
+  var currentCrc = int(footprint(filename))
+  var f: TFile
+  if open(f, crcFile, fmRead): 
+    var line = newStringOfCap(40)
+    if not f.readLine(line): line = "0"
+    close(f)
+    var oldCrc = parseInt(line)
+    result = oldCrc != currentCrc
+  else:
+    result = true
+  if result: 
+    if open(f, crcFile, fmWrite):
+      f.writeln($currentCrc)
+      close(f)
+
+proc addExternalFileToCompile*(filename: string) =
+  if optForceFullMake in gGlobalOptions or externalFileChanged(filename):
+    appendStr(externalToCompile, filename)
+
 proc CompileCFile(list: TLinkedList, script: var PRope, cmds: var TStringSeq, 
                   isExternal: bool) = 
   var it = PStrEntry(list.head)
@@ -540,7 +550,7 @@ proc CompileCFile(list: TLinkedList, script: var PRope, cmds: var TStringSeq,
       app(script, tnl)
     it = PStrEntry(it.next)
 
-proc CallCCompiler*(projectfile: string) = 
+proc CallCCompiler*(projectfile: string) =
   var 
     linkCmd, buildgui, builddll: string
   if gGlobalOptions * {optCompileOnly, optGenScript} == {optCompileOnly}: 
@@ -563,7 +573,12 @@ proc CallCCompiler*(projectfile: string) =
     else: 
       res = execProcesses(cmds, {poUseShell, poParentStreams}, 
                           gNumberOfProcessors)
-    if res != 0: rawMessage(errExecutionOfProgramFailed, [])
+    if res != 0:
+      if gNumberOfProcessors <= 1:
+        rawMessage(errExecutionOfProgramFailed, [])
+      else:
+        rawMessage(errGenerated, " execution of an external program failed; " &
+                   "rerun with --parallelBuild:1 to see the error message")
   if optNoLinking notin gGlobalOptions:
     # call the linker:
     var it = PStrEntry(toLink.head)

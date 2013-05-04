@@ -1,7 +1,7 @@
 #
 #
 #            Nimrod's Runtime Library
-#        (c) Copyright 2012 Andreas Rumpf
+#        (c) Copyright 2013 Andreas Rumpf
 #
 #    See the file "copying.txt", included in this
 #    distribution, for details about the copyright.
@@ -28,6 +28,7 @@ type
       id: THandle
     else:
       inputHandle, outputHandle, errorHandle: TFileHandle
+      inStream, outStream, errStream: PStream
       id: TPid
     exitCode: cint
 
@@ -43,11 +44,12 @@ type
 proc execProcess*(command: string,
                   options: set[TProcessOption] = {poStdErrToStdOut,
                                                   poUseShell}): TaintedString {.
-                                                  rtl, extern: "nosp$1".}
+                                                  rtl, extern: "nosp$1",
+                                                  tags: [FExecIO, FReadIO].}
   ## A convenience procedure that executes ``command`` with ``startProcess``
   ## and returns its output as a string.
 
-proc execCmd*(command: string): int {.rtl, extern: "nosp$1".}
+proc execCmd*(command: string): int {.rtl, extern: "nosp$1", tags: [FExecIO].}
   ## Executes ``command`` and returns its error code. Standard input, output,
   ## error streams are inherited from the calling process. This operation
   ## is also often called `system`:idx:.
@@ -57,7 +59,7 @@ proc startProcess*(command: string,
                    args: openarray[string] = [],
                    env: PStringTable = nil, 
                    options: set[TProcessOption] = {poStdErrToStdOut}): 
-              PProcess {.rtl, extern: "nosp$1".}
+              PProcess {.rtl, extern: "nosp$1", tags: [FExecIO, FReadEnv].}
   ## Starts a process. `Command` is the executable file, `workingDir` is the
   ## process's working directory. If ``workingDir == ""`` the current directory
   ## is used. `args` are the command line arguments that are passed to the
@@ -73,7 +75,8 @@ proc startProcess*(command: string,
   ## but ``EOS`` is raised in case of an error.
 
 proc startCmd*(command: string, options: set[TProcessOption] = {
-               poStdErrToStdOut, poUseShell}): PProcess =
+               poStdErrToStdOut, poUseShell}): PProcess {.
+               tags: [FExecIO, FReadEnv].} =
   ## a simpler version of `startProcess` that parses the command line into
   ## program and arguments and then calls `startProcess` with the empty string
   ## for `workingDir` and the nil string table for `env`.
@@ -83,39 +86,49 @@ proc startCmd*(command: string, options: set[TProcessOption] = {
   for i in 1 .. c.len-1: a[i-1] = c[i]
   result = startProcess(command=c[0], args=a, options=options)
 
-proc close*(p: PProcess) {.rtl, extern: "nosp$1".}
+proc close*(p: PProcess) {.rtl, extern: "nosp$1", tags: [].}
   ## When the process has finished executing, cleanup related handles
 
-proc suspend*(p: PProcess) {.rtl, extern: "nosp$1".}
+proc suspend*(p: PProcess) {.rtl, extern: "nosp$1", tags: [].}
   ## Suspends the process `p`.
 
-proc resume*(p: PProcess) {.rtl, extern: "nosp$1".}
+proc resume*(p: PProcess) {.rtl, extern: "nosp$1", tags: [].}
   ## Resumes the process `p`.
 
-proc terminate*(p: PProcess) {.rtl, extern: "nosp$1".}
+proc terminate*(p: PProcess) {.rtl, extern: "nosp$1", tags: [].}
   ## Terminates the process `p`.
 
-proc running*(p: PProcess): bool {.rtl, extern: "nosp$1".}
+proc running*(p: PProcess): bool {.rtl, extern: "nosp$1", tags: [].}
   ## Returns true iff the process `p` is still running. Returns immediately.
 
 proc processID*(p: PProcess): int {.rtl, extern: "nosp$1".} =
   ## returns `p`'s process ID.
   return p.id
 
-proc waitForExit*(p: PProcess, timeout: int = -1): int {.rtl, extern: "nosp$1".}
+proc waitForExit*(p: PProcess, timeout: int = -1): int {.rtl, 
+  extern: "nosp$1", tags: [].}
   ## waits for the process to finish and returns `p`'s error code.
 
-proc peekExitCode*(p: PProcess): int
+proc peekExitCode*(p: PProcess): int {.tags: [].}
   ## return -1 if the process is still running. Otherwise the process' exit code
 
-proc inputStream*(p: PProcess): PStream {.rtl, extern: "nosp$1".}
-  ## opens ``p``'s input stream for writing to
+proc inputStream*(p: PProcess): PStream {.rtl, extern: "nosp$1", tags: [].}
+  ## returns ``p``'s input stream for writing to
+  ##
+  ## **Warning**: The returned `PStream` should not be closed manually as it 
+  ## is closed when closing the PProcess ``p``.
 
-proc outputStream*(p: PProcess): PStream {.rtl, extern: "nosp$1".}
-  ## opens ``p``'s output stream for reading from
+proc outputStream*(p: PProcess): PStream {.rtl, extern: "nosp$1", tags: [].}
+  ## returns ``p``'s output stream for reading from
+  ##
+  ## **Warning**: The returned `PStream` should not be closed manually as it 
+  ## is closed when closing the PProcess ``p``.
 
-proc errorStream*(p: PProcess): PStream {.rtl, extern: "nosp$1".}
-  ## opens ``p``'s output stream for reading from
+proc errorStream*(p: PProcess): PStream {.rtl, extern: "nosp$1", tags: [].}
+  ## returns ``p``'s output stream for reading from
+  ##
+  ## **Warning**: The returned `PStream` should not be closed manually as it 
+  ## is closed when closing the PProcess ``p``.
 
 when defined(macosx) or defined(bsd):
   const
@@ -156,7 +169,8 @@ proc countProcessors*(): int {.rtl, extern: "nosp$1".} =
 
 proc execProcesses*(cmds: openArray[string],
                     options = {poStdErrToStdOut, poParentStreams},
-                    n = countProcessors()): int {.rtl, extern: "nosp$1".} =
+                    n = countProcessors()): int {.rtl, extern: "nosp$1", 
+                    tags: [FExecIO, FTime, FReadEnv].} =
   ## executes the commands `cmds` in parallel. Creates `n` processes
   ## that execute in parallel. The highest return value of all processes
   ## is returned.
@@ -197,9 +211,9 @@ proc execProcesses*(cmds: openArray[string],
             q[r] = startCmd(cmds[i], options=options)
             inc(i)
             if i > high(cmds): break
-    for i in 0..m-1:
-      if q[i] != nil: close(q[i])
-      result = max(waitForExit(q[i]), result)
+    for j in 0..m-1:
+      if q[j] != nil: close(q[j])
+      result = max(waitForExit(q[j]), result)
   else:
     for i in 0..high(cmds):
       var p = startCmd(cmds[i], options=options)
@@ -211,6 +225,9 @@ proc select*(readfds: var seq[PProcess], timeout = 500): int
   ## Specify -1 for no timeout. Returns the number of processes that are
   ## ready to read from. The processes that are ready to be read from are
   ## removed from `readfds`.
+  ##
+  ## **Warning**: This function may give unexpected or completely wrong
+  ## results on Windows.
 
 when not defined(useNimRtl):
   proc execProcess(command: string,
@@ -225,7 +242,6 @@ when not defined(useNimRtl):
         result.string.add(line.string)
         result.string.add("\n")
       elif not running(p): break
-    close(outp)
     close(p)
 
 
@@ -631,6 +647,9 @@ elif not defined(useNimRtl):
       discard close(p_stdout[writeIdx])
 
   proc close(p: PProcess) =
+    if p.inStream != nil: close(p.inStream)
+    if p.outStream != nil: close(p.outStream)
+    if p.errStream != nil: close(p.errStream)
     discard close(p.inputHandle)
     discard close(p.outputHandle)
     discard close(p.errorHandle)
@@ -671,20 +690,26 @@ elif not defined(useNimRtl):
     if p.exitCode == -3: result = -1
     else: result = p.exitCode.int shr 8
 
-  proc inputStream(p: PProcess): PStream =
+  proc createStream(stream: var PStream, handle: var TFileHandle,
+                    fileMode: TFileMode) =
     var f: TFile
-    if not open(f, p.inputHandle, fmWrite): OSError()
-    result = newFileStream(f)
+    if not open(f, handle, fileMode): OSError()
+    stream = newFileStream(f)
+
+  proc inputStream(p: PProcess): PStream =
+    if p.inStream == nil:
+      createStream(p.inStream, p.inputHandle, fmWrite)
+    return p.inStream
 
   proc outputStream(p: PProcess): PStream =
-    var f: TFile
-    if not open(f, p.outputHandle, fmRead): OSError()
-    result = newFileStream(f)
+    if p.outStream == nil:
+      createStream(p.outStream, p.outputHandle, fmRead)
+    return p.outStream
 
   proc errorStream(p: PProcess): PStream =
-    var f: TFile
-    if not open(f, p.errorHandle, fmRead): OSError()
-    result = newFileStream(f)
+    if p.errStream == nil:
+      createStream(p.errStream, p.errorHandle, fmRead)
+    return p.errStream
 
   proc csystem(cmd: cstring): cint {.nodecl, importc: "system".}
 
@@ -728,7 +753,7 @@ elif not defined(useNimRtl):
 proc execCmdEx*(command: string, options: set[TProcessOption] = {
                 poStdErrToStdOut, poUseShell}): tuple[
                 output: TaintedString, 
-                exitCode: int] =
+                exitCode: int] {.tags: [FExecIO, FReadIO].} =
   ## a convenience proc that runs the `command`, grabs all its output and
   ## exit code and returns both.
   var p = startCmd(command, options)
@@ -742,9 +767,7 @@ proc execCmdEx*(command: string, options: set[TProcessOption] = {
     else:
       result[1] = peekExitCode(p)
       if result[1] != -1: break
-  close(outp)
   close(p)
-
 
 when isMainModule:
   var x = execProcess("gcc -v")

@@ -18,32 +18,44 @@ import
 type  
   TPassContext* = object of TObject # the pass's context
     fromCache*: bool  # true if created by "openCached"
-    
+   
   PPassContext* = ref TPassContext
-  TPass* = tuple[
-    open: proc (module: PSym, filename: string): PPassContext {.nimcall.},
-    openCached: proc (module: PSym, filename: string,
-                     rd: PRodReader): PPassContext {.nimcall.},
-    close: proc (p: PPassContext, n: PNode): PNode {.nimcall.},
-    process: proc (p: PPassContext, topLevelStmt: PNode): PNode {.nimcall.}]
-    
+
+  TPassOpen* = proc (module: PSym): PPassContext {.nimcall.}
+  TPassOpenCached* =
+    proc (module: PSym, rd: PRodReader): PPassContext {.nimcall.}
+  TPassClose* = proc (p: PPassContext, n: PNode): PNode {.nimcall.}
+  TPassProcess* = proc (p: PPassContext, topLevelStmt: PNode): PNode {.nimcall.}
+
+  TPass* = tuple[open: TPassOpen, openCached: TPassOpenCached,
+                 process: TPassProcess, close: TPassClose]
+
+  TPassData* = tuple[input: PNode, closeOutput: Pnode]
+  TPasses* = openarray[TPass]
+
 # a pass is a tuple of procedure vars ``TPass.close`` may produce additional 
 # nodes. These are passed to the other close procedures. 
 # This mechanism used to be used for the instantiation of generics.
 
-proc registerPass*(p: TPass)
-proc initPass*(p: var TPass)
+proc makePass*(open: TPassOpen = nil,
+               openCached: TPassOpenCached = nil,
+               process: TPassProcess = nil,
+               close: TPassClose = nil): TPass =
+  result.open = open
+  result.openCached = openCached
+  result.close = close
+  result.process = process
+
   # This implements a memory preserving scheme: Top level statements are
   # processed in a pipeline. The compiler never looks at a whole module
   # any longer. However, this is simple to change, as new passes may perform
   # whole program optimizations. For now, we avoid it to save a lot of memory.
-proc processModule*(module: PSym, filename: string, stream: PLLStream, 
-                    rd: PRodReader)
+proc processModule*(module: PSym, stream: PLLStream, rd: PRodReader)
 
 # the semantic checker needs these:
 var 
-  gImportModule*: proc (filename: string): PSym {.nimcall.}
-  gIncludeFile*: proc (filename: string): PNode {.nimcall.}
+  gImportModule*: proc (m: PSym, fileIdx: int32): PSym {.nimcall.}
+  gIncludeFile*: proc (m: PSym, fileIdx: int32): PNode {.nimcall.}
 
 # implementation
 
@@ -74,23 +86,37 @@ type
 
 var 
   gPasses: array[0..maxPasses - 1, TPass]
-  gPassesLen: int
+  gPassesLen*: int
 
-proc registerPass(p: TPass) = 
+proc clearPasses* =
+  gPassesLen = 0
+
+proc registerPass*(p: TPass) = 
   gPasses[gPassesLen] = p
   inc(gPassesLen)
 
-proc openPasses(a: var TPassContextArray, module: PSym, filename: string) = 
+proc carryPass*(p: TPass, module: PSym, m: TPassData): TPassData =
+  var c = p.open(module)
+  result.input = p.process(c, m.input)
+  result.closeOutput = if p.close != nil: p.close(c, m.closeOutput)
+                       else: m.closeOutput
+
+proc carryPasses*(nodes: PNode, module: PSym, passes: TPasses) =
+  var passdata: TPassData
+  passdata.input = nodes
+  for pass in passes:
+    passdata = carryPass(pass, module, passdata)
+
+proc openPasses(a: var TPassContextArray, module: PSym) =
   for i in countup(0, gPassesLen - 1): 
     if not isNil(gPasses[i].open): 
-      a[i] = gPasses[i].open(module, filename)
+      a[i] = gPasses[i].open(module)
     else: a[i] = nil
   
-proc openPassesCached(a: var TPassContextArray, module: PSym, filename: string, 
-                      rd: PRodReader) = 
+proc openPassesCached(a: var TPassContextArray, module: PSym, rd: PRodReader) =
   for i in countup(0, gPassesLen - 1): 
     if not isNil(gPasses[i].openCached): 
-      a[i] = gPasses[i].openCached(module, filename, rd)
+      a[i] = gPasses[i].openCached(module, rd)
       if a[i] != nil: 
         a[i].fromCache = true
     else:
@@ -102,11 +128,14 @@ proc closePasses(a: var TPassContextArray) =
     if not isNil(gPasses[i].close): m = gPasses[i].close(a[i], m)
     a[i] = nil                # free the memory here
   
-proc processTopLevelStmt(n: PNode, a: var TPassContextArray) = 
+proc processTopLevelStmt(n: PNode, a: var TPassContextArray): bool = 
   # this implements the code transformation pipeline
   var m = n
   for i in countup(0, gPassesLen - 1): 
-    if not isNil(gPasses[i].process): m = gPasses[i].process(a[i], m)
+    if not isNil(gPasses[i].process): 
+      m = gPasses[i].process(a[i], m)
+      if isNil(m): return false
+  result = true
   
 proc processTopLevelStmtCached(n: PNode, a: var TPassContextArray) = 
   # this implements the code transformation pipeline
@@ -128,19 +157,18 @@ proc processImplicits(implicits: seq[string], nodeKind: TNodeKind,
     var str = newStrNode(nkStrLit, module)
     str.info = gCmdLineInfo
     importStmt.addSon str
-    processTopLevelStmt importStmt, a
+    if not processTopLevelStmt(importStmt, a): break
 
-type
-  TGripProc = proc (module: PSym, filename: string, stream: PLLStream)
-
+type TGripProc = proc (module: PSym, filename: string, stream: PLLStream)
 var grip*: TGripProc
-
-proc processModule(module: PSym, filename: string, stream: PLLStream, 
-                   rd: PRodReader) = 
+  
+proc processModule(module: PSym, stream: PLLStream, rd: PRodReader) =
   var 
     p: TParsers
     a: TPassContextArray
     s: PLLStream
+    fileIdx = module.fileIdx
+  
   if filename.endsWith(".g"):
     if stream == nil:
       s = LLStreamOpen(filename, fmRead)
@@ -151,16 +179,17 @@ proc processModule(module: PSym, filename: string, stream: PLLStream,
     return
 
   if rd == nil: 
-    openPasses(a, module, filename)
+    openPasses(a, module)
     if stream == nil: 
+      let filename = fileIdx.toFullPath
       s = LLStreamOpen(filename, fmRead)
       if s == nil: 
         rawMessage(errCannotOpenFile, filename)
-        return 
+        return
     else: 
       s = stream
     while true: 
-      openParsers(p, filename, s)
+      openParsers(p, fileIdx, s)
 
       if sfSystemModule notin module.flags:
         # XXX what about caching? no processing then? what if I change the 
@@ -173,7 +202,7 @@ proc processModule(module: PSym, filename: string, stream: PLLStream,
       while true: 
         var n = parseTopLevelStmt(p)
         if n.kind == nkEmpty: break 
-        processTopLevelStmt(n, a)
+        if not processTopLevelStmt(n, a): break
 
       closeParsers(p)
       if s.kind != llsStdIn: break 
@@ -181,13 +210,8 @@ proc processModule(module: PSym, filename: string, stream: PLLStream,
     # id synchronization point for more consistent code generation:
     IDsynchronizationPoint(1000)
   else:
-    openPassesCached(a, module, filename, rd)
+    openPassesCached(a, module, rd)
     var n = loadInitSection(rd)
     for i in countup(0, sonsLen(n) - 1): processTopLevelStmtCached(n.sons[i], a)
     closePassesCached(a)
 
-proc initPass(p: var TPass) = 
-  p.open = nil
-  p.openCached = nil
-  p.close = nil
-  p.process = nil

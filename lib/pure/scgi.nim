@@ -23,6 +23,8 @@
 ##
 ##    run(handleRequest)
 ##
+## **Warning:** The API of this module is unstable, and therefore is subject
+## to change.
 
 import sockets, strutils, os, strtabs, asyncio
 
@@ -101,6 +103,7 @@ proc next*(s: var TScgistate, timeout: int = -1): bool =
   ## Returns `True` if a new request has been processed.
   var rsocks = @[s.server]
   if select(rsocks, timeout) == 1 and rsocks.len == 0:
+    new(s.client)
     accept(s.server, s.client)
     var L = 0
     while true:
@@ -143,7 +146,7 @@ proc run*(handleRequest: proc (client: TSocket, input: string,
 
 # -- AsyncIO start
 proc handleAccept(sock: PAsyncSocket, s: PAsyncScgiState) =
-  
+  new(s.client)
   accept(getSocket(s.asyncServer), s.client)
   var L = 0
   while true:

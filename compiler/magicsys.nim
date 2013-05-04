@@ -38,10 +38,13 @@ proc newSysType(kind: TTypeKind, size: int): PType =
 
 proc getSysSym(name: string): PSym = 
   result = StrTableGet(systemModule.tab, getIdent(name))
-  if result == nil: rawMessage(errSystemNeeds, name)
+  if result == nil: 
+    rawMessage(errSystemNeeds, name)
+    result = newSym(skError, getIdent(name), systemModule, systemModule.info)
+    result.typ = newType(tyError, systemModule)
   if result.kind == skStub: loadStub(result)
   
-proc sysTypeFromName(name: string): PType = 
+proc sysTypeFromName*(name: string): PType = 
   result = getSysSym(name).typ
 
 proc getSysType(kind: TTypeKind): PType = 
@@ -76,6 +79,15 @@ proc getSysType(kind: TTypeKind): PType =
 
 var
   intTypeCache: array[-5..64, PType]
+
+proc resetSysTypes* =
+  systemModule = nil
+  initStrTable(compilerprocs)
+  for i in low(gSysTypes)..high(gSysTypes):
+    gSysTypes[i] = nil
+
+  for i in low(intTypeCache)..high(intTypeCache):
+    intTypeCache[i] = nil
 
 proc getIntLitType*(literal: PNode): PType =
   # we cache some common integer literal types for performance:

@@ -1,7 +1,7 @@
 #
 #
 #           The Nimrod Compiler
-#        (c) Copyright 2012 Andreas Rumpf
+#        (c) Copyright 2013 Andreas Rumpf
 #
 #    See the file "copying.txt", included in this
 #    distribution, for details about the copyright.
@@ -184,8 +184,9 @@ proc analyseCall(c: PProcCtx, n: PNode): TThreadOwner =
     call.args[i-1] = analyse(c, n[i])
   if not computed.hasKey(call):
     computed[call] = toUndefined # we are computing it
-    for i in 1..n.len-1: 
-      var formal = skipTypes(prc.typ, abstractInst).n.sons[i].sym 
+    let prctyp = skipTypes(prc.typ, abstractInst).n
+    for i in 1.. prctyp.len-1: 
+      var formal = prctyp.sons[i].sym 
       newCtx.mapping[formal.id] = call.args[i-1]
     pushInfoContext(n.info)
     result = analyse(newCtx, prc.getBody)
@@ -226,7 +227,8 @@ proc analyseVarSection(c: PProcCtx, n: PNode): TThreadOwner =
     var a = n.sons[i]
     if a.kind == nkCommentStmt: continue 
     if a.kind == nkIdentDefs: 
-      assert(a.sons[0].kind == nkSym)
+      #assert(a.sons[0].kind == nkSym); also valid for after
+      # closure transformation:
       analyseSingleVar(c, a)
     else:
       analyseVarTuple(c, a)
@@ -309,6 +311,12 @@ proc analyse(c: PProcCtx, n: PNode): TThreadOwner =
     # container construction:
     result = toNil # nothing until later
     for i in 0..n.len-1: aggregateOwner(result, analyse(c, n[i]))
+  of nkObjConstr:
+    if n.typ != nil and containsGarbageCollectedRef(n.typ):
+      result = toMine
+    else:
+      result = toNil # nothing until later
+    for i in 1..n.len-1: aggregateOwner(result, analyse(c, n[i]))
   of nkAddr, nkHiddenAddr:
     var a = lvalueSym(n)
     if a.kind == nkSym:
@@ -359,8 +367,11 @@ proc analyse(c: PProcCtx, n: PNode): TThreadOwner =
   of nkReturnStmt, nkDiscardStmt: 
     if n.sons[0].kind != nkEmpty: result = analyse(c, n.sons[0])
     else: result = toVoid
+  of nkLambdaKinds, nkClosure:
+    result = toMine
   of nkAsmStmt, nkPragma, nkIteratorDef, nkProcDef, nkMethodDef,
-     nkConverterDef, nkMacroDef, nkTemplateDef, nkLambdaKinds: 
+     nkConverterDef, nkMacroDef, nkTemplateDef,
+     nkGotoState, nkState, nkBreakState, nkType:
       result = toVoid
   of nkExprColonExpr:
     result = analyse(c, n.sons[1])

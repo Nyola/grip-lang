@@ -1,7 +1,7 @@
 #
 #
 #           The Nimrod Compiler
-#        (c) Copyright 2012 Andreas Rumpf
+#        (c) Copyright 2013 Andreas Rumpf
 #
 #    See the file "copying.txt", included in this
 #    distribution, for details about the copyright.
@@ -12,6 +12,8 @@ import
   
 const
   hasTinyCBackend* = defined(tinyc)
+  useEffectSystem* = true
+  hasFFI* = defined(useFFI)
 
 type                          # please make sure we have under 32 options
                               # (improves code efficiency a lot!)
@@ -29,9 +31,10 @@ type                          # please make sure we have under 32 options
     optImplicitStatic,        # optimization: implicit at compile time
                               # evaluation
     optPatterns               # en/disable pattern matching
+
   TOptions* = set[TOption]
   TGlobalOption* = enum       # **keep binary compatible**
-    gloptNone, optForceFullMake, optBoehmGC, optRefcGC, optDeadCodeElim, 
+    gloptNone, optForceFullMake, optDeadCodeElim, 
     optListCmd, optCompileOnly, optNoLinking, 
     optSafeCode,              # only allow safe code
     optCDebug,                # turn on debugging information
@@ -42,6 +45,7 @@ type                          # please make sure we have under 32 options
     optGenMapping,            # generate a mapping file
     optRun,                   # run the compiled project
     optSymbolFiles,           # use symbol files for speeding up compilation
+    optCaasEnabled            # compiler-as-a-service is running
     optSkipConfigFile,        # skip the general config file
     optSkipProjConfigFile,    # skip the project's config file
     optSkipUserConfigFile,    # skip the users's config file
@@ -57,13 +61,14 @@ type                          # please make sure we have under 32 options
     optTaintMode,             # taint mode turned on
     optTlsEmulation,          # thread var emulation turned on
     optGenIndex               # generate index file for documentation;
+    optEmbedOrigSrc           # embed the original source in the generated code
                               # also: generate header file
-
+   
   TGlobalOptions* = set[TGlobalOption]
   TCommands* = enum           # Nimrod's commands
                               # **keep binary compatible**
     cmdNone, cmdCompileToC, cmdCompileToCpp, cmdCompileToOC, 
-    cmdCompileToEcmaScript, cmdCompileToLLVM, cmdInterpret, cmdPretty, cmdDoc, 
+    cmdCompileToJS, cmdCompileToLLVM, cmdInterpret, cmdPretty, cmdDoc, 
     cmdGenDepend, cmdDump, 
     cmdCheck,                 # semantic checking for whole project
     cmdParse,                 # parse a single file (for debugging)
@@ -75,8 +80,10 @@ type                          # please make sure we have under 32 options
     cmdInteractive,           # start interactive session
     cmdRun                    # run the project via TCC backend
   TStringSeq* = seq[string]
+  TGCMode* = enum             # the selected GC
+    gcNone, gcBoehm, gcMarkAndSweep, gcRefc, gcV2, gcGenerational
 
-const 
+const
   ChecksOptions* = {optObjCheck, optFieldCheck, optRangeCheck, optNilCheck, 
     optOverflowCheck, optBoundsCheck, optAssert, optNaNCheck, optInfCheck}
 
@@ -85,14 +92,32 @@ var
                          optBoundsCheck, optOverflowCheck, optAssert, optWarns, 
                          optHints, optStackTrace, optLineTrace,
                          optPatterns}
-  gGlobalOptions*: TGlobalOptions = {optRefcGC, optThreadAnalysis}
+  gGlobalOptions*: TGlobalOptions = {optThreadAnalysis}
   gExitcode*: int8
-  searchPaths*: TLinkedList
+  gCmd*: TCommands = cmdNone  # the command
+  gSelectedGC* = gcRefc       # the selected GC
+  searchPaths*, lazyPaths*: TLinkedList
   outFile*: string = ""
   headerFile*: string = ""
-  gCmd*: TCommands = cmdNone  # the command
-  gVerbosity*: int            # how verbose the compiler is
+  gVerbosity* = 1             # how verbose the compiler is
   gNumberOfProcessors*: int   # number of processors
+  gWholeProject*: bool        # for 'doc2': output any dependency
+  gEvalExpr* = ""             # expression for idetools --eval
+  gLastCmdTime*: float        # when caas is enabled, we measure each command
+  gListFullPaths*: bool
+  isServing*: bool = false
+
+proc importantComments*(): bool {.inline.} = gCmd in {cmdDoc, cmdIdeTools}
+proc usesNativeGC*(): bool {.inline.} = gSelectedGC >= gcRefc
+
+template compilationCachePresent*: expr =
+  {optCaasEnabled, optSymbolFiles} * gGlobalOptions != {}
+
+template optPreserveOrigSource*: expr =
+  optEmbedOrigSrc in gGlobalOptions
+
+template optPrintSurroundingSrc*: expr =
+  gVerbosity >= 2
 
 const 
   genSubDir* = "nimcache"
@@ -108,10 +133,13 @@ const
 # additional configuration variables:
 var
   gConfigVars* = newStringTable(modeStyleInsensitive)
+  gDllOverrides = newStringtable(modeCaseInsensitive)
   libpath* = ""
   gProjectName* = "" # holds a name like 'nimrod'
   gProjectPath* = "" # holds a path like /home/alice/projects/nimrod/compiler/
   gProjectFull* = "" # projectPath/projectName
+  gProjectMainIdx*: int32 # the canonical path id of the main module
+  optMainModule* = "" # the main module that should be used for idetools commands
   nimcacheDir* = ""
   command* = "" # the main command (e.g. cc, check, scan, etc)
   commandArgs*: seq[string] = @[] # any arguments after the main command
@@ -191,27 +219,67 @@ proc completeGeneratedFilePath*(f: string, createSubDir: bool = true): string =
   result = joinPath(subdir, tail)
   #echo "completeGeneratedFilePath(", f, ") = ", result
 
-iterator iterSearchPath*(): string = 
+iterator iterSearchPath*(SearchPaths: TLinkedList): string = 
   var it = PStrEntry(SearchPaths.head)
-  while it != nil: 
+  while it != nil:
     yield it.data
     it = PStrEntry(it.Next)
 
 proc rawFindFile(f: string): string =
-  for it in iterSearchPath():
+  for it in iterSearchPath(SearchPaths):
     result = JoinPath(it, f)
-    if ExistsFile(result):
+    if existsFile(result):
       return result.canonicalizePath
   result = ""
 
+proc rawFindFile2(f: string): string =
+  var it = PStrEntry(lazyPaths.head)
+  while it != nil:
+    result = JoinPath(it.data, f)
+    if existsFile(result):
+      bringToFront(lazyPaths, it)
+      return result.canonicalizePath
+    it = PStrEntry(it.Next)
+  result = ""
+
 proc FindFile*(f: string): string {.procvar.} = 
-  result = rawFindFile(f)
-  if len(result) == 0: result = rawFindFile(toLower(f))
+  result = f.rawFindFile
+  if result.len == 0:
+    result = f.toLower.rawFindFile
+    if result.len == 0:
+      result = f.rawFindFile2
+      if result.len == 0:
+        result = f.toLower.rawFindFile2
 
 proc findModule*(modulename: string): string {.inline.} =
   # returns path to module
   result = FindFile(AddFileExt(modulename, nimExt))
   if len(result) == 0: result = FindFile(AddFileExt(modulename, ".g"))
+
+proc libCandidates*(s: string, dest: var seq[string]) = 
+  var le = strutils.find(s, '(')
+  var ri = strutils.find(s, ')', le+1)
+  if le >= 0 and ri > le:
+    var prefix = substr(s, 0, le - 1)
+    var suffix = substr(s, ri + 1)
+    for middle in split(substr(s, le + 1, ri - 1), '|'):
+      libCandidates(prefix & middle & suffix, dest)
+  else: 
+    add(dest, s)
+
+proc canonDynlibName(s: string): string =
+  let start = if s.startsWith("lib"): 3 else: 0
+  let ende = strutils.find(s, {'(', ')', '.'})
+  if ende >= 0:
+    result = s.substr(start, ende-1)
+  else:
+    result = s.substr(start)
+
+proc inclDynlibOverride*(lib: string) =
+  gDllOverrides[lib.canonDynlibName] = "true"
+
+proc isDynlibOverride*(lib: string): bool =
+  result = gDllOverrides.hasKey(lib.canonDynlibName)
 
 proc binaryStrSearch*(x: openarray[string], y: string): int = 
   var a = 0
@@ -227,8 +295,8 @@ proc binaryStrSearch*(x: openarray[string], y: string): int =
       return mid
   result = - 1
 
-# Can we keep this? I'm using it all the time
-template nimdbg*: expr = c.filename.endsWith"hallo.nim"
-template cnimdbg*: expr = p.module.filename.endsWith"hallo.nim"
-template enimdbg*: expr = c.module.name.s == "hallo"
-template pnimdbg*: expr = p.lex.fileIdx.ToFilename.endsWith"hallo.nim"
+template nimdbg*: expr = c.module.fileIdx == gProjectMainIdx
+template cnimdbg*: expr = p.module.module.fileIdx == gProjectMainIdx
+template pnimdbg*: expr = p.lex.fileIdx == gProjectMainIdx
+template lnimdbg*: expr = L.fileIdx == gProjectMainIdx
+

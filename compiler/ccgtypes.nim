@@ -1,7 +1,7 @@
 #
 #
 #           The Nimrod Compiler
-#        (c) Copyright 2012 Andreas Rumpf
+#        (c) Copyright 2013 Andreas Rumpf
 #
 #    See the file "copying.txt", included in this
 #    distribution, for details about the copyright.
@@ -69,13 +69,13 @@ proc mangleName(s: PSym): PRope =
   if result == nil: 
     if gCmd == cmdCompileToLLVM: 
       case s.kind
-      of skProc, skMethod, skConverter, skConst: 
-        result = toRope("@")
+      of skProc, skMethod, skConverter, skConst, skIterator: 
+        result = ~"@"
       of skVar, skForVar, skResult, skLet: 
-        if sfGlobal in s.flags: result = toRope("@")
-        else: result = toRope("%")
+        if sfGlobal in s.flags: result = ~"@"
+        else: result = ~"%"
       of skTemp, skParam, skType, skEnumField, skModule: 
-        result = toRope("%")
+        result = ~"%"
       else: InternalError(s.info, "mangleName")
     when oKeepVariableNames:
       let keepOrigName = s.kind in skLocalVars - {skForVar} and 
@@ -126,14 +126,14 @@ proc mangleName(s: PSym): PRope =
       # These are not properly scoped now - we need to add blocks
       # around for loops in transf
       if keepOrigName:
-        result = s.name.s.mangle.toRope
+        result = s.name.s.mangle.newRope
       else:
-        app(result, toRope(mangle(s.name.s)))
-        app(result, "_")
+        app(result, newRope(mangle(s.name.s)))
+        app(result, ~"_")
         app(result, toRope(s.id))
     else:
-      app(result, toRope(mangle(s.name.s)))
-      app(result, "_")
+      app(result, newRope(mangle(s.name.s)))
+      app(result, ~"_")
       app(result, toRope(s.id))
     s.loc.r = result
 
@@ -148,11 +148,9 @@ proc containsCompileTimeOnly(t: PType): bool =
         return true
   return false
 
-var anonTypeName = toRope"TY"
-
 proc typeName(typ: PType): PRope =
   result = if typ.sym != nil: typ.sym.name.s.mangle.toRope
-           else: anonTypeName
+           else: ~"TY"
 
 proc getTypeName(typ: PType): PRope = 
   if (typ.sym != nil) and ({sfImportc, sfExportc} * typ.sym.flags != {}) and
@@ -161,7 +159,7 @@ proc getTypeName(typ: PType): PRope =
   else:
     if typ.loc.r == nil:
       typ.loc.r = if gCmd != cmdCompileToLLVM: con(typ.typeName, typ.id.toRope)
-                  else: con(["%".toRope, typ.typeName, typ.id.toRope])
+                  else: con([~"%", typ.typeName, typ.id.toRope])
     result = typ.loc.r
   if result == nil: InternalError("getTypeName: " & $typ.kind)
   
@@ -195,8 +193,8 @@ proc mapType(typ: PType): TCTypeKind =
       of 8: result = ctInt64
       else: internalError("mapType")
   of tyRange: result = mapType(typ.sons[0])
-  of tyPtr, tyVar, tyRef: 
-    var base = skipTypes(typ.sons[0], abstractInst)
+  of tyPtr, tyVar, tyRef:
+    var base = skipTypes(typ.sons[0], typedescInst)
     case base.kind
     of tyOpenArray, tyArrayConstr, tyArray, tyVarargs: result = ctArray
     else: result = ctPtr
@@ -210,7 +208,7 @@ proc mapType(typ: PType): TCTypeKind =
   else: InternalError("mapType")
   
 proc mapReturnType(typ: PType): TCTypeKind = 
-  if skipTypes(typ, abstractInst).kind == tyArray: result = ctPtr
+  if skipTypes(typ, typedescInst).kind == tyArray: result = ctPtr
   else: result = mapType(typ)
   
 proc getTypeDescAux(m: BModule, typ: PType, check: var TIntSet): PRope
@@ -226,10 +224,10 @@ proc isInvalidReturnType(rettype: PType): bool =
   else: 
     case mapType(rettype)
     of ctArray: 
-      result = not (skipTypes(rettype, abstractInst).kind in
+      result = not (skipTypes(rettype, typedescInst).kind in
           {tyVar, tyRef, tyPtr})
     of ctStruct: 
-      result = needsComplexAssignment(skipTypes(rettype, abstractInst))
+      result = needsComplexAssignment(skipTypes(rettype, typedescInst))
     else: result = false
   
 const 
@@ -249,13 +247,13 @@ proc CacheGetType(tab: TIdTable, key: PType): PRope =
   result = PRope(IdTableGet(tab, key))
 
 proc getTempName(): PRope = 
-  result = ropeff("TMP$1", "%TMP$1", [toRope(backendId())])
+  result = rfmt(nil, "TMP$1", toRope(backendId()))
 
 proc getGlobalTempName(): PRope = 
-  result = ropeff("TMP$1", "@TMP$1", [toRope(backendId())])
+  result = rfmt(nil, "TMP$1", toRope(backendId()))
 
 proc ccgIntroducedPtr(s: PSym): bool = 
-  var pt = skipTypes(s.typ, abstractInst)
+  var pt = skipTypes(s.typ, typedescInst)
   assert skResult != s.kind
   if tfByRef in pt.flags: return true
   elif tfByCopy in pt.flags: return false
@@ -273,7 +271,7 @@ proc ccgIntroducedPtr(s: PSym): bool =
   else: result = false
   
 proc fillResult(param: PSym) = 
-  fillLoc(param.loc, locParam, param.typ, ropeff("Result", "%Result", []), 
+  fillLoc(param.loc, locParam, param.typ, ~"Result",
           OnStack)
   if (mapReturnType(param.typ) != ctArray) and IsInvalidReturnType(param.typ): 
     incl(param.loc.flags, lfIndirect)
@@ -282,30 +280,37 @@ proc fillResult(param: PSym) =
 proc getParamTypeDesc(m: BModule, t: PType, check: var TIntSet): PRope =
   when false:
     if t.Kind in {tyRef, tyPtr, tyVar}:
-      var b = skipTypes(t.sons[0], abstractInst)
+      var b = skipTypes(t.sons[0], typedescInst)
       if b.kind == tySet and mapSetType(b) == ctArray:
         return getTypeDescAux(m, b, check)
   result = getTypeDescAux(m, t, check)
+
+proc paramStorageLoc(param: PSym): TStorageLoc =
+  if param.typ.skipTypes({tyVar, tyTypeDesc}).kind notin {tyArray, tyOpenArray}:
+    result = OnStack
+  else:
+    result = OnUnknown
 
 proc genProcParams(m: BModule, t: PType, rettype, params: var PRope, 
                    check: var TIntSet, declareEnvironment=true) = 
   params = nil
   if (t.sons[0] == nil) or isInvalidReturnType(t.sons[0]): 
-    rettype = toRope("void")
+    rettype = ~"void"
   else: 
     rettype = getTypeDescAux(m, t.sons[0], check)
   for i in countup(1, sonsLen(t.n) - 1): 
     if t.n.sons[i].kind != nkSym: InternalError(t.n.info, "genProcParams")
     var param = t.n.sons[i].sym
     if isCompileTimeOnly(param.typ): continue
-    if params != nil: app(params, ", ")
-    fillLoc(param.loc, locParam, param.typ, mangleName(param), OnStack)
+    if params != nil: app(params, ~", ")
+    fillLoc(param.loc, locParam, param.typ, mangleName(param),
+            param.paramStorageLoc)
     app(params, getParamTypeDesc(m, param.typ, check))
     if ccgIntroducedPtr(param): 
-      app(params, "*")
+      app(params, ~"*")
       incl(param.loc.flags, lfIndirect)
       param.loc.s = OnUnknown
-    app(params, " ")
+    app(params, ~" ")
     app(params, param.loc.r)
     # declare the len field for open arrays:
     var arr = param.typ
@@ -567,7 +572,7 @@ proc getTypeDescAux(m: BModule, typ: PType, check: var TIntSet): PRope =
     assert(CacheGetType(m.typeCache, t) == nil)
     IdTablePut(m.typeCache, t, con(result, "*"))
     if not isImportedType(t): 
-      if skipTypes(t.sons[0], abstractInst).kind != tyEmpty: 
+      if skipTypes(t.sons[0], typedescInst).kind != tyEmpty: 
         const
           cppSeq = "struct $2 : #TGenericSeq {$n"
           cSeq = "struct $2 {$n" &
@@ -694,11 +699,14 @@ when false:
     var tmp = getNimType(m)
     appf(m.s[cfsTypeInit2], "$2 = &$1;$n", [tmp, name])
 
+proc isObjLackingTypeField(typ: PType): bool {.inline.} =
+  result = (typ.kind == tyObject) and ((tfFinal in typ.flags) and
+      (typ.sons[0] == nil) or isPureObject(typ))
+
 proc genTypeInfoAuxBase(m: BModule, typ: PType, name, base: PRope) = 
   var nimtypeKind: int
   #allocMemTI(m, typ, name)
-  if (typ.kind == tyObject) and (tfFinal in typ.flags) and
-      (typ.sons[0] == nil): 
+  if isObjLackingTypeField(typ):
     nimtypeKind = ord(tyPureObject)
   else:
     nimtypeKind = ord(typ.kind)
@@ -736,7 +744,7 @@ proc discriminatorTableName(m: BModule, objtype: PType, d: PSym): PRope =
   if objType.sym == nil: 
     InternalError(d.info, "anonymous obj with discriminator")
   result = ropef("NimDT_$1_$2", [
-    toRope(objType.sym.name.s), toRope(d.name.s)])
+    toRope(objType.sym.name.s.mangle), toRope(d.name.s.mangle)])
 
 proc discriminatorTableDecl(m: BModule, objtype: PType, d: PSym): PRope = 
   discard cgsym(m, "TNimNode")
@@ -907,7 +915,7 @@ include ccgtrav
 proc genTypeInfo(m: BModule, typ: PType): PRope = 
   var t = getUniqueType(typ)
   result = ropef("NTI$1", [toRope(t.id)])
-  let owner = typ.skipTypes(abstractPtrs).owner.getModule
+  let owner = typ.skipTypes(typedescPtrs).owner.getModule
   if owner != m.module:
     # make sure the type info is created in the owner module
     discard genTypeInfo(owner.bmod, typ)
@@ -930,7 +938,7 @@ proc genTypeInfo(m: BModule, typ: PType): PRope =
       genTupleInfo(m, fakeClosureType(t.owner), result)
   of tySequence, tyRef:
     genTypeInfoAux(m, t, result)
-    if optRefcGC in gGlobalOptions:
+    if gSelectedGC >= gcMarkAndSweep:
       let markerProc = genTraverseProc(m, t, tiNew)
       appf(m.s[cfsTypeInit3], "$1.marker = $2;$n", [result, markerProc])
   of tyPtr, tyRange: genTypeInfoAux(m, t, result)

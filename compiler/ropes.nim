@@ -56,7 +56,7 @@
 #  To cache them they are inserted in a `cache` array.
 
 import 
-  msgs, strutils, platform, hashes, crc, options
+  strutils, platform, hashes, crc, options
 
 type
   TFormatStr* = string # later we may change it to CString for better
@@ -71,6 +71,11 @@ type
     data*: string             # != nil if a leaf
   
   TRopeSeq* = seq[PRope]
+
+  TRopesError* = enum
+    rCannotOpenFile
+    rInvalidFormatStr
+    rTokenTooLong
 
 proc con*(a, b: PRope): PRope
 proc con*(a: PRope, b: string): PRope
@@ -92,11 +97,14 @@ proc RopeInvariant*(r: PRope): bool
   # exported for debugging
 # implementation
 
+var ErrorHandler*: proc(err: TRopesError, msg: string, useWarning = false)
+  # avoid dependency on msgs.nim
+  
 proc ropeLen(a: PRope): int = 
   if a == nil: result = 0
   else: result = a.length
   
-proc newRope(data: string = nil): PRope = 
+proc newRope*(data: string = nil): PRope = 
   new(result)
   if data != nil: 
     result.length = len(data)
@@ -114,6 +122,10 @@ proc freezeMutableRope*(r: PRope) {.inline.} =
 var 
   cache: array[0..2048*2 -1, PRope]
 
+proc resetRopeCache* =
+  for i in low(cache)..high(cache):
+    cache[i] = nil
+
 proc RopeInvariant(r: PRope): bool = 
   if r == nil: 
     result = true
@@ -127,10 +139,16 @@ proc RopeInvariant(r: PRope): bool =
                   #      if result then result := ropeInvariant(r.right);
                   #    end 
 
+var gCacheTries* = 0
+var gCacheMisses* = 0
+var gCacheIntTries* = 0
+
 proc insertInCache(s: string): PRope = 
+  inc gCacheTries
   var h = hash(s) and high(cache)
   result = cache[h]
   if isNil(result) or result.data != s:
+    inc gCacheMisses
     result = newRope(s)
     cache[h] = result
   
@@ -186,7 +204,13 @@ proc con(a: string, b: PRope): PRope = result = con(toRope(a), b)
 proc con(a: varargs[PRope]): PRope = 
   for i in countup(0, high(a)): result = con(result, a[i])
 
-proc toRope(i: BiggestInt): PRope = result = toRope($i)
+proc ropeConcat*(a: varargs[PRope]): PRope =
+  # not overloaded version of concat to speed-up `rfmt` a little bit
+  for i in countup(0, high(a)): result = con(result, a[i])
+
+proc toRope(i: BiggestInt): PRope =
+  inc gCacheIntTries
+  result = toRope($i)
 
 proc app(a: var PRope, b: PRope) = a = con(a, b)
 proc app(a: var PRope, b: string) = a = con(a, b)
@@ -209,8 +233,11 @@ proc WriteRope*(head: PRope, filename: string, useWarning = false) =
     if head != nil: WriteRope(f, head)
     close(f)
   else:
-    rawMessage(if useWarning: warnCannotOpenFile else: errCannotOpenFile,
-               filename)
+    ErrorHandler(rCannotOpenFile, filename, useWarning)
+
+var
+  rnl* = tnl.newRope
+  softRnl* = tnl.newRope
 
 proc ropef(frmt: TFormatStr, args: varargs[PRope]): PRope = 
   var i = 0
@@ -235,17 +262,18 @@ proc ropef(frmt: TFormatStr, args: varargs[PRope]): PRope =
           inc(i)
           if (i > length + 0 - 1) or not (frmt[i] in {'0'..'9'}): break 
         num = j
-        if j > high(args) + 1: 
-          internalError("ropes: invalid format string $" & $(j))
+        if j > high(args) + 1:
+          ErrorHandler(rInvalidFormatStr, $(j))
         else:
           app(result, args[j - 1])
       of 'n':
-        if optLineDir notin gOptions: app(result, tnl)
+        app(result, softRnl)
         inc i
       of 'N':
-        app(result, tnl)
+        app(result, rnl)
         inc(i)
-      else: InternalError("ropes: invalid format string $" & frmt[i])
+      else:
+        ErrorHandler(rInvalidFormatStr, $(frmt[i]))
     var start = i
     while i < length:
       if frmt[i] != '$': inc(i)
@@ -253,6 +281,14 @@ proc ropef(frmt: TFormatStr, args: varargs[PRope]): PRope =
     if i - 1 >= start: 
       app(result, substr(frmt, start, i - 1))
   assert(RopeInvariant(result))
+
+{.push stack_trace: off, line_trace: off.}
+proc `~`*(r: expr[string]): PRope =
+  # this is the new optimized "to rope" operator
+  # the mnemonic is that `~` looks a bit like a rope :)
+  var r {.global.} = r.ropef
+  return r
+{.pop.}
 
 proc appf(c: var PRope, frmt: TFormatStr, args: varargs[PRope]) = 
   app(c, ropef(frmt, args))
@@ -262,8 +298,8 @@ const
 
 proc auxRopeEqualsFile(r: PRope, bin: var tfile, buf: Pointer): bool = 
   if r.data != nil:
-    if r.length > bufSize: 
-      internalError("ropes: token too long")
+    if r.length > bufSize:
+      ErrorHandler(rTokenTooLong, r.data)
       return
     var readBytes = readBuffer(bin, buf, r.length)
     result = readBytes == r.length and

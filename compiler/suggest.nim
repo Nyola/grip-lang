@@ -1,7 +1,7 @@
 #
 #
 #           The Nimrod Compiler
-#        (c) Copyright 2012 Andreas Rumpf
+#        (c) Copyright 2013 Andreas Rumpf
 #
 #    See the file "copying.txt", included in this
 #    distribution, for details about the copyright.
@@ -17,6 +17,8 @@ const
   sectionDef = "def"
   sectionContext = "con"
   sectionUsage = "use"
+
+#template sectionSuggest(): expr = "##begin\n" & getStackTrace() & "##end\n"
 
 proc SymToStr(s: PSym, isLocal: bool, section: string, li: TLineInfo): string = 
   result = section
@@ -37,6 +39,8 @@ proc SymToStr(s: PSym, isLocal: bool, section: string, li: TLineInfo): string =
   result.add($ToLinenumber(li))
   result.add(sep)
   result.add($ToColumn(li))
+  result.add(sep)
+  result.add(s.extractDocComment.escape)
 
 proc SymToStr(s: PSym, isLocal: bool, section: string): string = 
   result = SymToStr(s, isLocal, section, s.info)

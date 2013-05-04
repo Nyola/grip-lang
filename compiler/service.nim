@@ -12,18 +12,22 @@
 import 
   sockets,
   times, commands, options, msgs, nimconf,
-  extccomp, strutils, os, platform, main, parseopt
+  extccomp, strutils, os, platform, parseopt
 
 # We cache modules and the dependency graph. However, we don't check for
 # file changes but expect the client to tell us about them, otherwise the
 # repeated CRC calculations may turn out to be too slow.
 
-var 
-  arguments: string = ""      # the arguments to be passed to the program that
-                              # should be run
+var
+  curCaasCmd* = ""
+  lastCaasCmd* = ""
+    # in caas mode, the list of defines and options will be given at start-up?
+    # it's enough to check that the previous compilation command is the same?
+  arguments* = ""
+    # the arguments to be passed to the program that
+    # should be run
 
-proc ProcessCmdLine(pass: TCmdLinePass, cmd: string) = 
-  # XXX remove duplication with nimrod.nim
+proc ProcessCmdLine*(pass: TCmdLinePass, cmd: string) =
   var p = parseopt.initOptParser(cmd)
   var argsCount = 0
   while true: 
@@ -57,15 +61,35 @@ proc ProcessCmdLine(pass: TCmdLinePass, cmd: string) =
       rawMessage(errArgsNeedRunOption, [])
 
 proc serve*(action: proc (){.nimcall.}) =
-  var server = Socket()
-  let p = getConfigVar("server.port")
-  let port = if p.len > 0: parseInt(p).TPort else: 6000.TPort
-  server.bindAddr(port, getConfigVar("server.address"))
-  var inp = "".TaintedString
-  server.listen()
-  while true:
-    accept(server, stdoutSocket)
-    discard stdoutSocket.recvLine(inp)
-    processCmdLine(passCmd2, inp.string)
+  template execute(cmd) =
+    curCaasCmd = cmd
+    processCmdLine(passCmd2, cmd)
     action()
-    stdoutSocket.send("\c\L")
+
+  let typ = getConfigVar("server.type")
+  case typ
+  of "stdin":
+    while true:
+      var line = stdin.readLine.string
+      if line == "quit": quit()
+      execute line
+      echo ""
+      FlushFile(stdout)
+
+  of "tcp", "":
+    var server = Socket()
+    let p = getConfigVar("server.port")
+    let port = if p.len > 0: parseInt(p).TPort else: 6000.TPort
+    server.bindAddr(port, getConfigVar("server.address"))
+    var inp = "".TaintedString
+    server.listen()
+    new(stdoutSocket)
+    while true:
+      accept(server, stdoutSocket)
+      stdoutSocket.readLine(inp)
+      execute inp.string
+      stdoutSocket.send("\c\L")
+      stdoutSocket.close()
+  else:
+    echo "Invalid server.type:", typ
+    quit 1

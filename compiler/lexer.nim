@@ -16,7 +16,7 @@
 # DOS or Macintosh text files, even when it is not the native format.
 
 import 
-  hashes, options, msgs, strutils, platform, idents, lexbase, llstream, 
+  hashes, options, msgs, strutils, platform, idents, nimlexbase, llstream,
   wordrecg
 
 const 
@@ -43,7 +43,7 @@ type
     tkLambda, tkLet,
     tkMacro, tkMethod, tkMixin, tkMod, tkNil, tkNot, tkNotin, 
     tkObject, tkOf, tkOr, tkOut, 
-    tkProc, tkPtr, tkRaise, tkRef, tkReturn, tkShl, tkShr, tkStatic,
+    tkProc, tkPtr, tkRaise, tkRef, tkReturn, tkShared, tkShl, tkShr, tkStatic,
     tkTemplate, 
     tkTry, tkTuple, tkType, tkVar, tkWhen, tkWhile, tkWith, tkWithout, tkXor,
     tkYield, # end of keywords
@@ -78,7 +78,8 @@ const
     "lambda", "let", 
     "macro", "method", "mixin", "mod", 
     "nil", "not", "notin", "object", "of", "or", 
-    "out", "proc", "ptr", "raise", "ref", "return", "shl", "shr", "static",
+    "out", "proc", "ptr", "raise", "ref", "return", 
+    "shared", "shl", "shr", "static",
     "template", 
     "try", "tuple", "type", "var", "when", "while", "with", "without", "xor",
     "yield",
@@ -125,7 +126,7 @@ proc pushInd*(L: var TLexer, indent: int)
 
 proc popInd*(L: var TLexer)
 proc isKeyword*(kind: TTokType): bool
-proc openLexer*(lex: var TLexer, filename: string, inputstream: PLLStream)
+proc openLexer*(lex: var TLexer, fileidx: int32, inputstream: PLLStream)
 proc rawGetTok*(L: var TLexer, tok: var TToken)
   # reads in the next token into tok and skips it
 proc getColumn*(L: TLexer): int
@@ -133,6 +134,9 @@ proc getLineInfo*(L: TLexer): TLineInfo
 proc closeLexer*(lex: var TLexer)
 proc PrintTok*(tok: TToken)
 proc tokToStr*(tok: TToken): string
+
+proc openLexer*(lex: var TLexer, filename: string, inputstream: PLLStream) =
+  OpenLexer(lex, filename.fileInfoIdx, inputStream)
 
 proc lexMessage*(L: TLexer, msg: TMsgKind, arg = "")
 
@@ -210,10 +214,10 @@ proc fillToken(L: var TToken) =
   L.base = base10
   L.ident = dummyIdent
   
-proc openLexer(lex: var TLexer, filename: string, inputstream: PLLStream) = 
+proc openLexer(lex: var TLexer, fileIdx: int32, inputstream: PLLStream) = 
   openBaseLexer(lex, inputstream)
   lex.indentStack = @[0]
-  lex.fileIdx = filename.fileInfoIdx
+  lex.fileIdx = fileIdx
   lex.indentAhead = - 1
   inc(lex.Linenumber, inputstream.lineOffset) 
 
@@ -504,17 +508,32 @@ proc getEscapedChar(L: var TLexer, tok: var TToken) =
     if (xi <= 255): add(tok.literal, Chr(xi))
     else: lexMessage(L, errInvalidCharacterConstant)
   else: lexMessage(L, errInvalidCharacterConstant)
+
+proc newString(s: cstring, len: int): string =
+  ## XXX, how come there is no support for this?
+  result = newString(len)
+  for i in 0 .. <len:
+    result[i] = s[i]
+
+proc HandleCRLF(L: var TLexer, pos: int): int =
+  template registerLine =
+    let col = L.getColNumber(pos)
+    
+    if col > MaxLineLength:
+      lexMessagePos(L, hintLineTooLong, pos)
+
+    if optEmbedOrigSrc in gGlobalOptions:
+      let lineStart = cast[TAddress](L.buf) + L.lineStart
+      let line = newString(cast[cstring](lineStart), col)
+      addSourceLine(L.fileIdx, line)
   
-proc HandleCRLF(L: var TLexer, pos: int): int = 
   case L.buf[pos]
-  of CR: 
-    if getColNumber(L, pos) > MaxLineLength: 
-      lexMessagePos(L, hintLineTooLong, pos)
-    result = lexbase.HandleCR(L, pos)
-  of LF: 
-    if getColNumber(L, pos) > MaxLineLength: 
-      lexMessagePos(L, hintLineTooLong, pos)
-    result = lexbase.HandleLF(L, pos)
+  of CR:
+    registerLine()
+    result = nimlexbase.HandleCR(L, pos)
+  of LF:
+    registerLine()
+    result = nimlexbase.HandleLF(L, pos)
   else: result = pos
   
 proc getString(L: var TLexer, tok: var TToken, rawMode: bool) = 
@@ -540,7 +559,7 @@ proc getString(L: var TLexer, tok: var TToken, rawMode: bool) =
         pos = HandleCRLF(L, pos)
         buf = L.buf
         add(tok.literal, tnl)
-      of lexbase.EndOfFile: 
+      of nimlexbase.EndOfFile: 
         var line2 = L.linenumber
         L.LineNumber = line
         lexMessagePos(L, errClosingTripleQuoteExpected, L.lineStart)
@@ -562,7 +581,7 @@ proc getString(L: var TLexer, tok: var TToken, rawMode: bool) =
         else:
           inc(pos) # skip '"'
           break
-      elif c in {CR, LF, lexbase.EndOfFile}: 
+      elif c in {CR, LF, nimlexbase.EndOfFile}: 
         lexMessage(L, errClosingQuoteExpected)
         break 
       elif (c == '\\') and not rawMode: 
@@ -656,10 +675,12 @@ proc scanComment(L: var TLexer, tok: var TToken) =
   # a comment ends if the next line does not start with the # on the same
   # column after only whitespace
   tok.tokType = tkComment
+  # iNumber contains the number of '\n' in the token
+  tok.iNumber = 0
   var col = getColNumber(L, pos)
   while true:
     var lastBackslash = -1
-    while buf[pos] notin {CR, LF, lexbase.EndOfFile}:
+    while buf[pos] notin {CR, LF, nimlexbase.EndOfFile}:
       if buf[pos] == '\\': lastBackslash = pos+1
       add(tok.literal, buf[pos])
       inc(pos)
@@ -667,7 +688,7 @@ proc scanComment(L: var TLexer, tok: var TToken) =
       # a backslash is a continuation character if only followed by spaces
       # plus a newline:
       while buf[lastBackslash] == ' ': inc(lastBackslash)
-      if buf[lastBackslash] notin {CR, LF, lexbase.EndOfFile}:
+      if buf[lastBackslash] notin {CR, LF, nimlexbase.EndOfFile}:
         # false positive:
         lastBackslash = -1
 
@@ -679,6 +700,8 @@ proc scanComment(L: var TLexer, tok: var TToken) =
       inc(indent)
     if buf[pos] == '#' and (col == indent or lastBackslash > 0):
       tok.literal.add "\n"
+      col = indent
+      inc tok.iNumber
     else:
       if buf[pos] > ' ': 
         L.indentAhead = indent
@@ -818,7 +841,7 @@ proc rawGetTok(L: var TLexer, tok: var TToken) =
     else:
       if c in OpChars: 
         getOperator(L, tok)
-      elif c == lexbase.EndOfFile:
+      elif c == nimlexbase.EndOfFile:
         tok.toktype = tkEof
       else:
         tok.literal = c & ""

@@ -60,7 +60,7 @@ proc genericAssignAux(dest, src: Pointer, mt: PNimType, shallow: bool) =
       unsureAsgnRef(x, s2)
       return
     sysAssert(dest != nil, "genericAssignAux 3")
-    unsureAsgnRef(x, newObj(mt, seq.len * mt.base.size + GenericSeqSize))
+    unsureAsgnRef(x, newSeq(mt, seq.len))
     var dst = cast[taddress](cast[ppointer](dest)[])
     for i in 0..seq.len-1:
       genericAssignAux(
@@ -68,9 +68,6 @@ proc genericAssignAux(dest, src: Pointer, mt: PNimType, shallow: bool) =
         cast[pointer](cast[taddress](s2) +% i *% mt.base.size +%
                      GenericSeqSize),
         mt.Base, shallow)
-    var dstseq = cast[PGenericSeq](dst)
-    dstseq.len = seq.len
-    dstseq.reserved = seq.len
   of tyObject:
     # we need to copy m_type field for tyObject, as it could be empty for
     # sequence reallocations:
@@ -97,6 +94,35 @@ proc genericShallowAssign(dest, src: Pointer, mt: PNimType) {.compilerProc.} =
   GC_disable()
   genericAssignAux(dest, src, mt, true)
   GC_enable()
+
+when false:
+  proc debugNimType(t: PNimType) =
+    if t.isNil: 
+      cprintf("nil!")
+      return
+    var k: cstring
+    case t.kind
+    of tyBool: k = "bool"
+    of tyChar: k = "char"
+    of tyEnum: k = "enum"
+    of tyArray: k = "array"
+    of tyObject: k = "object"
+    of tyTuple: k = "tuple"
+    of tyRange: k = "range"
+    of tyPtr: k = "ptr"
+    of tyRef: k = "ref"
+    of tyVar: k = "var"
+    of tySequence: k = "seq"
+    of tyProc: k = "proc"
+    of tyPointer: k = "range"
+    of tyOpenArray: k = "openarray"
+    of tyString: k = "string"
+    of tyCString: k = "cstring"
+    of tyInt: k = "int"
+    of tyInt32: k = "int32"
+    else: k = "other"
+    cprintf("%s %ld\n", k, t.size)
+    debugNimType(t.base)
 
 proc genericSeqAssign(dest, src: Pointer, mt: PNimType) {.compilerProc.} =
   var src = src # ugly, but I like to stress the parser sometimes :-)
@@ -144,11 +170,17 @@ proc objectInit(dest: Pointer, typ: PNimType) =
   
 # ---------------------- assign zero -----------------------------------------
 
-# dummy declaration; XXX we need 'mixin' here
-proc destroy(x: int) = nil
-proc nimDestroyRange*[T](r: T) =
-  # internal proc used for destroying sequences and arrays
-  for i in countup(0, r.len - 1): destroy(r[i])
+when not defined(nimmixin):
+  proc destroy(x: int) = nil
+  proc nimDestroyRange*[T](r: T) =
+    # internal proc used for destroying sequences and arrays
+    for i in countup(0, r.len - 1): destroy(r[i])
+else:
+  # XXX Why is this exported and no compilerproc?
+  proc nimDestroyRange*[T](r: T) =
+    # internal proc used for destroying sequences and arrays
+    mixin destroy
+    for i in countup(0, r.len - 1): destroy(r[i])
 
 proc genericReset(dest: Pointer, mt: PNimType) {.compilerProc.}
 proc genericResetAux(dest: Pointer, n: ptr TNimNode) =

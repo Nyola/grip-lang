@@ -14,7 +14,7 @@
 import 
   ast, strutils, strtabs, options, msgs, os, ropes, idents, 
   wordrecg, syntaxes, renderer, lexer, rstast, rst, rstgen, times, highlite, 
-  importer
+  importer, sempass2
 
 type
   TSections = array[TSymKind, PRope]
@@ -137,7 +137,27 @@ proc genRecComment(d: PDoc, n: PNode): PRope =
         if result != nil: return 
   else:
     n.comment = nil
-  
+
+proc findDocComment(n: PNode): PNode =
+  if n == nil: return nil
+  if not isNil(n.comment) and startsWith(n.comment, "##"): return n
+  for i in countup(0, safeLen(n)-1):
+    result = findDocComment(n.sons[i])
+    if result != nil: return
+
+proc extractDocComment*(s: PSym, d: PDoc = nil): string =
+  let n = findDocComment(s.ast)
+  result = ""
+  if not n.isNil:
+    if not d.isNil:
+      var dummyHasToc: bool
+      renderRstToOut(d[], parseRst(n.comment, toFilename(n.info),
+                                   toLineNumber(n.info), toColumn(n.info),
+                                   dummyHasToc, d.options + {roSkipPounds}),
+                     result)
+    else:
+      result = n.comment.substr(2).replace("\n##", "\n").strip
+
 proc isVisible(n: PNode): bool = 
   result = false
   if n.kind == nkPostfix: 
@@ -145,6 +165,9 @@ proc isVisible(n: PNode): bool =
       var v = n.sons[0].ident
       result = v.id == ord(wStar) or v.id == ord(wMinus)
   elif n.kind == nkSym:
+    # we cannot generate code for forwarded symbols here as we have no
+    # exception tracking information here. Instead we copy over the comment
+    # from the proc header.
     result = {sfExported, sfFromGeneric, sfForward}*n.sym.flags == {sfExported}
   elif n.kind == nkPragmaExpr:
     result = isVisible(n.sons[0])
@@ -245,12 +268,20 @@ proc traceDeps(d: PDoc, n: PNode) =
 proc generateDoc*(d: PDoc, n: PNode) = 
   case n.kind
   of nkCommentStmt: app(d.modDesc, genComment(d, n))
-  of nkProcDef: genItem(d, n, n.sons[namePos], skProc)
-  of nkMethodDef: genItem(d, n, n.sons[namePos], skMethod)
-  of nkIteratorDef: genItem(d, n, n.sons[namePos], skIterator)
+  of nkProcDef: 
+    when useEffectSystem: documentRaises(n)
+    genItem(d, n, n.sons[namePos], skProc)
+  of nkMethodDef:
+    when useEffectSystem: documentRaises(n)
+    genItem(d, n, n.sons[namePos], skMethod)
+  of nkIteratorDef: 
+    when useEffectSystem: documentRaises(n)
+    genItem(d, n, n.sons[namePos], skIterator)
   of nkMacroDef: genItem(d, n, n.sons[namePos], skMacro)
   of nkTemplateDef: genItem(d, n, n.sons[namePos], skTemplate)
-  of nkConverterDef: genItem(d, n, n.sons[namePos], skConverter)
+  of nkConverterDef:
+    when useEffectSystem: documentRaises(n)
+    genItem(d, n, n.sons[namePos], skConverter)
   of nkTypeSection, nkVarSection, nkLetSection, nkConstSection:
     for i in countup(0, sonsLen(n) - 1):
       if n.sons[i].kind != nkCommentStmt: 
@@ -265,7 +296,7 @@ proc generateDoc*(d: PDoc, n: PNode) =
       generateDoc(d, lastSon(n.sons[0]))
   of nkImportStmt:
     for i in 0 .. sonsLen(n)-1: traceDeps(d, n.sons[i]) 
-  of nkFromStmt: traceDeps(d, n.sons[0])
+  of nkFromStmt, nkImportExceptStmt: traceDeps(d, n.sons[0])
   else: nil
 
 proc genSection(d: PDoc, kind: TSymKind) = 
@@ -329,7 +360,7 @@ proc writeOutput*(d: PDoc, filename, outExt: string, useWarning = false) =
     writeRope(content, getOutFile(filename, outExt), useWarning)
 
 proc CommandDoc*() =
-  var ast = parseFile(addFileExt(gProjectFull, nimExt))
+  var ast = parseFile(gProjectMainIdx)
   if ast == nil: return 
   var d = newDocumentor(gProjectFull, options.gConfigVars)
   d.hasToc = true
@@ -342,9 +373,11 @@ proc CommandRstAux(filename, outExt: string) =
   var d = newDocumentor(filen, options.gConfigVars)
   var rst = parseRst(readFile(filen), filen, 0, 1, d.hasToc,
                      {roSupportRawDirective})
-  d.modDesc = newMutableRope(30_000)
-  renderRstToOut(d[], rst, d.modDesc.data)
-  freezeMutableRope(d.modDesc)
+  var modDesc = newStringOfCap(30_000)
+  #d.modDesc = newMutableRope(30_000)
+  renderRstToOut(d[], rst, modDesc)
+  #freezeMutableRope(d.modDesc)
+  d.modDesc = toRope(modDesc)
   writeOutput(d, filename, outExt)
   generateIndex(d)
 

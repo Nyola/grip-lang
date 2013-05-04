@@ -1,7 +1,7 @@
 #
 #
 #           The Nimrod Compiler
-#        (c) Copyright 2012 Andreas Rumpf
+#        (c) Copyright 2013 Andreas Rumpf
 #
 #    See the file "copying.txt", included in this
 #    distribution, for details about the copyright.
@@ -15,36 +15,34 @@ import
   magicsys, parser, nversion, nimsets, semfold, importer,
   procfind, lookups, rodread, pragmas, passes, semdata, semtypinst, sigmatch,
   semthreads, intsets, transf, evals, idgen, aliases, cgmeth, lambdalifting,
-  evaltempl, patterns, parampatterns
+  evaltempl, patterns, parampatterns, sempass2
 
-proc semPass*(): TPass
 # implementation
 
-type 
-  TExprFlag = enum 
-    efLValue, efWantIterator, efInTypeof, efWantStmt, efDetermineType
-  TExprFlags = set[TExprFlag]
-
-proc semExpr(c: PContext, n: PNode, flags: TExprFlags = {}): PNode
-proc semExprWithType(c: PContext, n: PNode, flags: TExprFlags = {}): PNode
+proc semExpr(c: PContext, n: PNode, flags: TExprFlags = {}): PNode {.procvar.}
+proc semExprWithType(c: PContext, n: PNode, flags: TExprFlags = {}): PNode {.
+  procvar.}
 proc semExprNoType(c: PContext, n: PNode): PNode
 proc semExprNoDeref(c: PContext, n: PNode, flags: TExprFlags = {}): PNode
 proc semProcBody(c: PContext, n: PNode): PNode
 
 proc fitNode(c: PContext, formal: PType, arg: PNode): PNode
-proc changeType(n: PNode, newType: PType)
+proc changeType(n: PNode, newType: PType, check: bool)
 
 proc semLambda(c: PContext, n: PNode, flags: TExprFlags): PNode
 proc semTypeNode(c: PContext, n: PNode, prev: PType): PType
 proc semStmt(c: PContext, n: PNode): PNode
 proc semParamList(c: PContext, n, genericParams: PNode, s: PSym)
 proc addParams(c: PContext, n: PNode, kind: TSymKind)
-proc addResult(c: PContext, t: PType, info: TLineInfo, owner: TSymKind)
-proc addResultNode(c: PContext, n: PNode)
+proc maybeAddResult(c: PContext, s: PSym, n: PNode)
 proc instGenericContainer(c: PContext, n: PNode, header: PType): PType
 proc tryExpr(c: PContext, n: PNode, flags: TExprFlags = {}): PNode
 proc fixImmediateParams(n: PNode): PNode
 proc activate(c: PContext, n: PNode)
+proc semQuoteAst(c: PContext, n: PNode): PNode
+proc finishMethod(c: PContext, s: PSym)
+
+proc IndexTypesMatch(c: PContext, f, a: PType, arg: PNode): PNode
 
 proc typeMismatch(n: PNode, formal, actual: PType) = 
   if formal.kind != tyError and actual.kind != tyError: 
@@ -158,7 +156,7 @@ proc semMacroExpr(c: PContext, n, nOrig: PNode, sym: PSym,
     GlobalError(n.info, errRecursiveDependencyX, sym.name.s)
 
   if c.evalContext == nil:
-    c.evalContext = newEvalContext(c.module, "", emStatic)
+    c.evalContext = newEvalContext(c.module, emStatic)
     c.evalContext.getType = proc (n: PNode): PNode =
       var e = tryExpr(c, n)
       if e == nil:
@@ -188,26 +186,25 @@ proc semConstBoolExpr(c: PContext, n: PNode): PNode =
 
 include semtypes, semtempl, semgnrc, semstmts, semexprs
 
-proc addCodeForGenerics(c: PContext, n: PNode) = 
-  for i in countup(c.generics.lastGenericIdx, Len(c.generics.generics) - 1):
-    var prc = c.generics.generics[i].instSym
-    if prc.kind in {skProc, skMethod, skConverter} and prc.magic == mNone: 
-      if prc.ast == nil or prc.ast.sons[bodyPos] == nil: 
+proc addCodeForGenerics(c: PContext, n: PNode) =
+  for i in countup(c.lastGenericIdx, c.generics.len - 1):
+    var prc = c.generics[i].inst.sym
+    if prc.kind in {skProc, skMethod, skConverter} and prc.magic == mNone:
+      if prc.ast == nil or prc.ast.sons[bodyPos] == nil:
         InternalError(prc.info, "no code for " & prc.name.s)
       else:
         addSon(n, prc.ast)
-  c.generics.lastGenericIdx = Len(c.generics.generics)
+  c.lastGenericIdx = c.generics.len
 
-proc semExprNoFlags(c: PContext, n: PNode): PNode {.procvar.} = 
-  result = semExpr(c, n, {})
-
-proc myOpen(module: PSym, filename: string): PPassContext = 
-  var c = newContext(module, filename)
+proc myOpen(module: PSym): PPassContext =
+  var c = newContext(module)
   if c.p != nil: InternalError(module.info, "sem.myOpen")
   c.semConstExpr = semConstExpr
-  c.semExpr = semExprNoFlags
+  c.semExpr = semExpr
+  c.semOperand = semOperand
   c.semConstBoolExpr = semConstBoolExpr
   c.semOverloadedCall = semOverloadedCall
+  c.semTypeNode = semTypeNode
   pushProcCon(c, module)
   pushOwner(c.module)
   openScope(c.tab)            # scope for imported symbols
@@ -221,15 +218,14 @@ proc myOpen(module: PSym, filename: string): PPassContext =
   openScope(c.tab)            # scope for the module's symbols  
   result = c
 
-proc myOpenCached(module: PSym, filename: string, 
-                  rd: PRodReader): PPassContext = 
-  result = myOpen(module, filename)
+proc myOpenCached(module: PSym, rd: PRodReader): PPassContext =
+  result = myOpen(module)
   for m in items(rd.methods): methodDef(m, true)
 
 proc SemStmtAndGenerateGenerics(c: PContext, n: PNode): PNode = 
   result = semStmt(c, n)
   # BUGFIX: process newly generated generics here, not at the end!
-  if c.generics.lastGenericIdx < Len(c.generics.generics):
+  if c.lastGenericIdx < c.generics.len:
     var a = newNodeI(nkStmtList, n.info)
     addCodeForGenerics(c, a)
     if sonsLen(a) > 0: 
@@ -259,12 +255,13 @@ proc myProcess(context: PPassContext, n: PNode): PNode =
     let oldInGenericInst = c.InGenericInst
     try:
       result = SemStmtAndGenerateGenerics(c, n)
-    except ERecoverableError:
+    except ERecoverableError, ESuggestDone:
       RecoverContext(c)
       c.InGenericInst = oldInGenericInst
-      result = ast.emptyNode
       msgs.setInfoContextLen(oldContextLen)
-      if gCmd == cmdIdeTools: findSuggest(c, n)
+      if getCurrentException() of ESuggestDone: result = nil
+      else: result = ast.emptyNode
+      #if gCmd == cmdIdeTools: findSuggest(c, n)
   
 proc checkThreads(c: PContext) =
   if not needsGlobalAnalysis(): return
@@ -285,12 +282,7 @@ proc myClose(context: PPassContext, n: PNode): PNode =
   popOwner()
   popProcCon(c)
 
-proc semPass(): TPass =
-  initPass(result)
-  result.open = myOpen
-  result.openCached = myOpenCached
-  result.close = myClose
-  result.process = myProcess
-
 include semgrip
+
+const semPass* = makePass(myOpen, myOpenCached, myProcess, myClose)
 

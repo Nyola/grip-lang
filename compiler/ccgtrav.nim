@@ -1,7 +1,7 @@
 #
 #
 #           The Nimrod Compiler
-#        (c) Copyright 2012 Andreas Rumpf
+#        (c) Copyright 2013 Andreas Rumpf
 #
 #    See the file "copying.txt", included in this
 #    distribution, for details about the copyright.
@@ -13,7 +13,7 @@
 # included from cgen.nim
 
 type
-  TTraversalClosure {.pure, final.} = object
+  TTraversalClosure = object
     p: BProc
     visitorFrmt: string
 
@@ -59,15 +59,15 @@ proc genTraverseProc(c: var TTraversalClosure, accessor: PRope, typ: PType) =
   if typ == nil: return
   var p = c.p
   case typ.kind
-  of tyGenericInst, tyGenericBody:
+  of tyGenericInst, tyGenericBody, tyTypeDesc:
     genTraverseProc(c, accessor, lastSon(typ))
   of tyArrayConstr, tyArray:
     let arraySize = lengthOrd(typ.sons[0])
     var i: TLoc
     getTemp(p, getSysType(tyInt), i)
-    lineF(p, cpsStmts, "for ($1 = 0; $1 < $2; $1++) {$n",
-        i.r, arraySize.toRope)
-    genTraverseProc(c, ropef("$1[$2]", accessor, i.r), typ.sons[1])
+    linefmt(p, cpsStmts, "for ($1 = 0; $1 < $2; $1++) {$n",
+            i.r, arraySize.toRope)
+    genTraverseProc(c, rfmt(nil, "$1[$2]", accessor, i.r), typ.sons[1])
     lineF(p, cpsStmts, "}$n")
   of tyObject:
     for i in countup(0, sonsLen(typ) - 1):
@@ -76,12 +76,12 @@ proc genTraverseProc(c: var TTraversalClosure, accessor: PRope, typ: PType) =
   of tyTuple:
     let typ = GetUniqueType(typ)
     for i in countup(0, sonsLen(typ) - 1):
-      genTraverseProc(c, ropef("$1.Field$2", accessor, i.toRope), typ.sons[i])
+      genTraverseProc(c, rfmt(nil, "$1.Field$2", accessor, i.toRope), typ.sons[i])
   of tyRef, tyString, tySequence:
     lineCg(p, cpsStmts, c.visitorFrmt, accessor)
   of tyProc:
     if typ.callConv == ccClosure:
-      lineCg(p, cpsStmts, c.visitorFrmt, ropef("$1.ClEnv", accessor))
+      lineCg(p, cpsStmts, c.visitorFrmt, rfmt(nil, "$1.ClEnv", accessor))
   else:
     nil
 
@@ -111,10 +111,11 @@ proc genTraverseProc(m: BModule, typ: PType, reason: TTypeInfoReason): PRope =
   lineF(p, cpsInit, "a = ($1)p;$n", t)
   
   c.p = p
+  assert typ.kind != tyTypedesc
   if typ.kind == tySequence:
     genTraverseProcSeq(c, "a".toRope, typ)
   else:
-    if skipTypes(typ.sons[0], abstractInst).kind in {tyArrayConstr, tyArray}:
+    if skipTypes(typ.sons[0], typedescInst).kind in {tyArrayConstr, tyArray}:
       # C's arrays are broken beyond repair:
       genTraverseProc(c, "a".toRope, typ.sons[0])
     else:
@@ -127,3 +128,20 @@ proc genTraverseProc(m: BModule, typ: PType, reason: TTypeInfoReason): PRope =
   m.s[cfsProcs].app(generatedProc)
 
 
+proc genTraverseProcForGlobal(m: BModule, s: PSym): PRope =
+  discard genTypeInfo(m, s.loc.t)
+  
+  var c: TTraversalClosure
+  var p = newProc(nil, m)
+  result = getGlobalTempName()
+  
+  c.visitorFrmt = "#nimGCvisit((void*)$1, 0);$n"
+  c.p = p
+  let header = ropef("N_NIMCALL(void, $1)()", result)
+  genTraverseProc(c, s.loc.r, s.loc.t)
+  
+  let generatedProc = ropef("$1 {$n$2$3$4}$n",
+        [header, p.s(cpsLocals), p.s(cpsInit), p.s(cpsStmts)])
+  
+  m.s[cfsProcHeaders].appf("$1;$n", header)
+  m.s[cfsProcs].app(generatedProc)

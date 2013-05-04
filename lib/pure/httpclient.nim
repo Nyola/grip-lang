@@ -50,6 +50,18 @@
 ## any of the functions a url with the ``https`` schema, for example:
 ## ``https://github.com/``, you also have to compile with ``ssl`` defined like so:
 ## ``nimrod c -d:ssl ...``.
+##
+## Timeouts
+## ========
+## Currently all functions support an optional timeout, by default the timeout is set to
+## `-1` which means that the function will never time out. The timeout is
+## measured in miliseconds, once it is set any call on a socket which may
+## block will be susceptible to this timeout, however please remember that the
+## function as a whole can take longer than the specified timeout, only
+## individual internal calls on the socket are affected. In practice this means
+## that as long as the server is sending data an exception will not be raised,
+## if however data does not reach client within the specified timeout an ETimeout
+## exception will then be raised.
 
 import sockets, strutils, parseurl, parseutils, strtabs
 
@@ -68,6 +80,8 @@ type
                                       ## and ``postContent`` proc,
                                       ## when the server returns an error
 
+const defUserAgent* = "Nimrod httpclient/0.1"
+
 proc httpError(msg: string) =
   var e: ref EInvalidProtocol
   new(e)
@@ -80,68 +94,48 @@ proc fileError(msg: string) =
   e.msg = msg
   raise e
 
-proc charAt(d: var string, i: var int, s: TSocket): char {.inline.} = 
-  result = d[i]
-  while result == '\0':
-    d = string(s.recv())
-    i = 0
-    result = d[i]
-
-proc parseChunks(s: TSocket): string =
-  # get chunks:
-  var i = 0
+proc parseChunks(s: TSocket, timeout: int): string =
   result = ""
-  var d = s.recv().string
+  var ri = 0
   while true:
+    var chunkSizeStr = ""
     var chunkSize = 0
-    var digitFound = false
-    while true: 
-      case d[i]
-      of '0'..'9': 
-        digitFound = true
-        chunkSize = chunkSize shl 4 or (ord(d[i]) - ord('0'))
-      of 'a'..'f': 
-        digitFound = true
-        chunkSize = chunkSize shl 4 or (ord(d[i]) - ord('a') + 10)
-      of 'A'..'F': 
-        digitFound = true
-        chunkSize = chunkSize shl 4 or (ord(d[i]) - ord('A') + 10)
-      of '\0': 
-        d = string(s.recv())
-        i = -1
-      else: break
+    s.readLine(chunkSizeStr, timeout)
+    var i = 0
+    if chunkSizeStr == "":
+      httpError("Server terminated connection prematurely")
+    while true:
+      case chunkSizeStr[i]
+      of '0'..'9':
+        chunkSize = chunkSize shl 4 or (ord(chunkSizeStr[i]) - ord('0'))
+      of 'a'..'f':
+        chunkSize = chunkSize shl 4 or (ord(chunkSizeStr[i]) - ord('a') + 10)
+      of 'A'..'F':
+        chunkSize = chunkSize shl 4 or (ord(chunkSizeStr[i]) - ord('A') + 10)
+      of '\0':
+        break
+      of ';':
+        # http://tools.ietf.org/html/rfc2616#section-3.6.1
+        # We don't care about chunk-extensions.
+        break
+      else:
+        httpError("Invalid chunk size: " & chunkSizeStr)
       inc(i)
-    if not digitFound: httpError("Chunksize expected")
     if chunkSize <= 0: break
-    while charAt(d, i, s) notin {'\C', '\L', '\0'}: inc(i)
-    if charAt(d, i, s) == '\C': inc(i)
-    if charAt(d, i, s) == '\L': inc(i)
-    else: httpError("CR-LF after chunksize expected")
-    
-    var x = substr(d, i, i+chunkSize-1)
-    var size = x.len
-    result.add(x)
-    inc(i, size)
-    if size < chunkSize:
-      # read in the rest:
-      var missing = chunkSize - size
-      var L = result.len
-      setLen(result, L + missing)    
-      while missing > 0:
-        var bytesRead = s.recv(addr(result[L]), missing)
-        inc(L, bytesRead)
-        dec(missing, bytesRead)
-      # next chunk:
-      d = string(s.recv())
-      i = 0
-    # skip trailing CR-LF:
-    while charAt(d, i, s) in {'\C', '\L'}: inc(i)
+    result.setLen(ri+chunkSize)
+    var bytesRead = 0
+    while bytesRead != chunkSize:
+      let ret = recv(s, addr(result[ri]), chunkSize-bytesRead, timeout)
+      ri += ret
+      bytesRead += ret
+    s.skip(2, timeout) # Skip \c\L
+    # Trailer headers will only be sent if the request specifies that we want
+    # them: http://tools.ietf.org/html/rfc2616#section-3.6.1
   
-proc parseBody(s: TSocket,
-               headers: PStringTable): string =
+proc parseBody(s: TSocket, headers: PStringTable, timeout: int): string =
   result = ""
   if headers["Transfer-Encoding"] == "chunked":
-    result = parseChunks(s)
+    result = parseChunks(s, timeout)
   else:
     # -REGION- Content-Length
     # (http://tools.ietf.org/html/rfc2616#section-4.4) NR.3
@@ -152,7 +146,7 @@ proc parseBody(s: TSocket,
       var received = 0
       while true:
         if received >= length: break
-        let r = s.recv(addr(result[received]), length-received)
+        let r = s.recv(addr(result[received]), length-received, timeout)
         if r == 0: break
         received += r
       if received != length:
@@ -167,12 +161,12 @@ proc parseBody(s: TSocket,
         var buf = ""
         while True:
           buf = newString(4000)
-          let r = s.recv(addr(buf[0]), 4000)
+          let r = s.recv(addr(buf[0]), 4000, timeout)
           if r == 0: break
           buf.setLen(r)
           result.add(buf)
 
-proc parseResponse(s: TSocket, getBody: bool): TResponse =
+proc parseResponse(s: TSocket, getBody: bool, timeout: int): TResponse =
   var parsedStatus = false
   var linei = 0
   var fullyRead = false
@@ -181,41 +175,42 @@ proc parseResponse(s: TSocket, getBody: bool): TResponse =
   while True:
     line = ""
     linei = 0
-    if s.recvLine(line):
-      if line == "": break # We've been disconnected.
-      if line == "\c\L":
-        fullyRead = true
-        break
-      if not parsedStatus:
-        # Parse HTTP version info and status code.
-        var le = skipIgnoreCase(line, "HTTP/", linei)
-        if le <= 0: httpError("invalid http version")
-        inc(linei, le)
-        le = skipIgnoreCase(line, "1.1", linei)
-        if le > 0: result.version = "1.1"
-        else:
-          le = skipIgnoreCase(line, "1.0", linei)
-          if le <= 0: httpError("unsupported http version")
-          result.version = "1.0"
-        inc(linei, le)
-        # Status code
-        linei.inc skipWhitespace(line, linei)
-        result.status = line[linei .. -1]
-        parsedStatus = true
+    s.readLine(line, timeout)
+    if line == "": break # We've been disconnected.
+    if line == "\c\L":
+      fullyRead = true
+      break
+    if not parsedStatus:
+      # Parse HTTP version info and status code.
+      var le = skipIgnoreCase(line, "HTTP/", linei)
+      if le <= 0: httpError("invalid http version")
+      inc(linei, le)
+      le = skipIgnoreCase(line, "1.1", linei)
+      if le > 0: result.version = "1.1"
       else:
-        # Parse headers
-        var name = ""
-        var le = parseUntil(line, name, ':', linei)
-        if le <= 0: httpError("invalid headers")
-        inc(linei, le)
-        if line[linei] != ':': httpError("invalid headers")
-        inc(linei) # Skip :
-        linei += skipWhitespace(line, linei)
-        
-        result.headers[name] = line[linei.. -1]
-  if not fullyRead: httpError("Connection was closed before full request has been made")
+        le = skipIgnoreCase(line, "1.0", linei)
+        if le <= 0: httpError("unsupported http version")
+        result.version = "1.0"
+      inc(linei, le)
+      # Status code
+      linei.inc skipWhitespace(line, linei)
+      result.status = line[linei .. -1]
+      parsedStatus = true
+    else:
+      # Parse headers
+      var name = ""
+      var le = parseUntil(line, name, ':', linei)
+      if le <= 0: httpError("invalid headers")
+      inc(linei, le)
+      if line[linei] != ':': httpError("invalid headers")
+      inc(linei) # Skip :
+      linei += skipWhitespace(line, linei)
+      
+      result.headers[name] = line[linei.. -1]
+  if not fullyRead:
+    httpError("Connection was closed before full request has been made")
   if getBody:
-    result.body = parseBody(s, result.headers)
+    result.body = parseBody(s, result.headers, timeout)
   else:
     result.body = ""
 
@@ -238,37 +233,53 @@ type
     httpCONNECT       ## Converts the request connection to a transparent 
                       ## TCP/IP tunnel, usually used for proxies.
 
+when not defined(ssl):
+  type PSSLContext = ref object
+  let defaultSSLContext: PSSLContext = nil
+else:
+  let defaultSSLContext = newContext(verifyMode = CVerifyNone)
+
 proc request*(url: string, httpMethod = httpGET, extraHeaders = "", 
-              body = ""): TResponse =
+              body = "",
+              sslContext: PSSLContext = defaultSSLContext,
+              timeout = -1, userAgent = defUserAgent): TResponse =
   ## | Requests ``url`` with the specified ``httpMethod``.
   ## | Extra headers can be specified and must be seperated by ``\c\L``
+  ## | An optional timeout can be specified in miliseconds, if reading from the
+  ## server takes longer than specified an ETimeout exception will be raised.
   var r = parseUrl(url)
-  
   var headers = substr($httpMethod, len("http"))
   headers.add(" /" & r.path & r.query)
 
   headers.add(" HTTP/1.1\c\L")
   
   add(headers, "Host: " & r.hostname & "\c\L")
+  if userAgent != "":
+    add(headers, "User-Agent: " & userAgent & "\c\L")
   add(headers, extraHeaders)
   add(headers, "\c\L")
-
+  
   var s = socket()
   var port = TPort(80)
   if r.scheme == "https":
     when defined(ssl):
-      s.wrapSocket(verifyMode = CVerifyNone)
+      sslContext.wrapSocket(s)
     else:
-      raise newException(EHttpRequestErr, "SSL support was not compiled in. Cannot connect over SSL.")
+      raise newException(EHttpRequestErr,
+                "SSL support is not available. Cannot connect over SSL.")
     port = TPort(443)
   if r.port != "":
     port = TPort(r.port.parseInt)
-  s.connect(r.hostname, port)
+  
+  if timeout == -1:
+    s.connect(r.hostname, port)
+  else:
+    s.connect(r.hostname, port, timeout)
   s.send(headers)
   if body != "":
     s.send(body)
   
-  result = parseResponse(s, httpMethod != httpHEAD)
+  result = parseResponse(s, httpMethod != httpHEAD, timeout)
   s.close()
   
 proc redirection(status: string): bool =
@@ -276,54 +287,94 @@ proc redirection(status: string): bool =
   for i in items(redirectionNRs):
     if status.startsWith(i):
       return True
+
+proc getNewLocation(lastUrl: string, headers: PStringTable): string =
+  result = headers["Location"]
+  if result == "": httpError("location header expected")
+  # Relative URLs. (Not part of the spec, but soon will be.)
+  let r = parseURL(result)
+  if r.hostname == "" and r.path != "":
+    let origParsed = parseURL(lastUrl)
+    result = origParsed.hostname & "/" & r.path
   
-proc get*(url: string, maxRedirects = 5): TResponse =
-  ## | GET's the ``url`` and returns a ``TResponse`` object
+proc get*(url: string, extraHeaders = "", maxRedirects = 5,
+          sslContext: PSSLContext = defaultSSLContext,
+          timeout = -1, userAgent = defUserAgent): TResponse =
+  ## | GETs the ``url`` and returns a ``TResponse`` object
   ## | This proc also handles redirection
-  result = request(url)
+  ## | Extra headers can be specified and must be separated by ``\c\L``.
+  ## | An optional timeout can be specified in miliseconds, if reading from the
+  ## server takes longer than specified an ETimeout exception will be raised.
+  result = request(url, httpGET, extraHeaders, "", sslContext, timeout, userAgent)
+  var lastURL = url
   for i in 1..maxRedirects:
     if result.status.redirection():
-      var locationHeader = result.headers["Location"]
-      if locationHeader == "": httpError("location header expected")
-      result = request(locationHeader)
+      let redirectTo = getNewLocation(lastURL, result.headers)
+      result = request(redirectTo, httpGET, extraHeaders, "", sslContext,
+                       timeout, userAgent)
+      lastUrl = redirectTo
       
-proc getContent*(url: string): string =
-  ## | GET's the body and returns it as a string.
+proc getContent*(url: string, extraHeaders = "", maxRedirects = 5,
+                 sslContext: PSSLContext = defaultSSLContext,
+                 timeout = -1, userAgent = defUserAgent): string =
+  ## | GETs the body and returns it as a string.
   ## | Raises exceptions for the status codes ``4xx`` and ``5xx``
-  var r = get(url)
+  ## | Extra headers can be specified and must be separated by ``\c\L``.
+  ## | An optional timeout can be specified in miliseconds, if reading from the
+  ## server takes longer than specified an ETimeout exception will be raised.
+  var r = get(url, extraHeaders, maxRedirects, sslContext, timeout, userAgent)
   if r.status[0] in {'4','5'}:
     raise newException(EHTTPRequestErr, r.status)
   else:
     return r.body
   
-proc post*(url: string, extraHeaders = "", body = "", 
-           maxRedirects = 5): TResponse =
-  ## | POST's ``body`` to the ``url`` and returns a ``TResponse`` object.
+proc post*(url: string, extraHeaders = "", body = "",
+           maxRedirects = 5,
+           sslContext: PSSLContext = defaultSSLContext,
+           timeout = -1, userAgent = defUserAgent): TResponse =
+  ## | POSTs ``body`` to the ``url`` and returns a ``TResponse`` object.
   ## | This proc adds the necessary Content-Length header.
   ## | This proc also handles redirection.
+  ## | Extra headers can be specified and must be separated by ``\c\L``.
+  ## | An optional timeout can be specified in miliseconds, if reading from the
+  ## server takes longer than specified an ETimeout exception will be raised.
   var xh = extraHeaders & "Content-Length: " & $len(body) & "\c\L"
-  result = request(url, httpPOST, xh, body)
+  result = request(url, httpPOST, xh, body, sslContext, timeout, userAgent)
+  var lastUrl = ""
   for i in 1..maxRedirects:
     if result.status.redirection():
-      var locationHeader = result.headers["Location"]
-      if locationHeader == "": httpError("location header expected")
+      let redirectTo = getNewLocation(lastURL, result.headers)
       var meth = if result.status != "307": httpGet else: httpPost
-      result = request(locationHeader, meth, xh, body)
+      result = request(redirectTo, meth, xh, body, sslContext, timeout,
+                       userAgent)
+      lastUrl = redirectTo
   
-proc postContent*(url: string, extraHeaders = "", body = ""): string =
-  ## | POST's ``body`` to ``url`` and returns the response's body as a string
+proc postContent*(url: string, extraHeaders = "", body = "",
+                  maxRedirects = 5,
+                  sslContext: PSSLContext = defaultSSLContext,
+                  timeout = -1, userAgent = defUserAgent): string =
+  ## | POSTs ``body`` to ``url`` and returns the response's body as a string
   ## | Raises exceptions for the status codes ``4xx`` and ``5xx``
-  var r = post(url, extraHeaders, body)
+  ## | Extra headers can be specified and must be separated by ``\c\L``.
+  ## | An optional timeout can be specified in miliseconds, if reading from the
+  ## server takes longer than specified an ETimeout exception will be raised.
+  var r = post(url, extraHeaders, body, maxRedirects, sslContext, timeout,
+               userAgent)
   if r.status[0] in {'4','5'}:
     raise newException(EHTTPRequestErr, r.status)
   else:
     return r.body
   
-proc downloadFile*(url: string, outputFilename: string) =
-  ## Downloads ``url`` and saves it to ``outputFilename``
+proc downloadFile*(url: string, outputFilename: string,
+                   sslContext: PSSLContext = defaultSSLContext,
+                   timeout = -1, userAgent = defUserAgent) =
+  ## | Downloads ``url`` and saves it to ``outputFilename``
+  ## | An optional timeout can be specified in miliseconds, if reading from the
+  ## server takes longer than specified an ETimeout exception will be raised.
   var f: TFile
   if open(f, outputFilename, fmWrite):
-    f.write(getContent(url))
+    f.write(getContent(url, sslContext = sslContext, timeout = timeout,
+            userAgent = userAgent))
     f.close()
   else:
     fileError("Unable to open file")

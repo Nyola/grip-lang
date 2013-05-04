@@ -18,7 +18,7 @@ import
 
 # Keywords must be kept sorted and within a range
 
-type 
+type
   TSpecialWord* = enum 
     wInvalid, 
     
@@ -30,7 +30,7 @@ type
     wInclude, wInterface, wIs, wIsnot, wIterator, wLambda, wLet,
     wMacro, wMethod, wMixin, wMod, wNil, 
     wNot, wNotin, wObject, wOf, wOr, wOut, wProc, wPtr, wRaise, wRef, wReturn, 
-    wShl, wShr, wStatic, wTemplate, wTry, wTuple, wType, wVar, 
+    wShared, wShl, wShr, wStatic, wTemplate, wTry, wTuple, wType, wVar, 
     wWhen, wWhile, wWith, wWithout, wXor, wYield,
     
     wColon, wColonColon, wEquals, wDot, wDotDot,
@@ -54,7 +54,7 @@ type
     wBoundchecks, wOverflowchecks, wNilchecks,
     wFloatchecks, wNanChecks, wInfChecks,
     wAssertions, wPatterns, wWarnings,
-    wHints, wOptimization, wSpeed, wSize, wNone, 
+    wHints, wOptimization, wRaises, wWrites, wReads, wSize, wEffects, wTags,
     wDeadCodeElim, wSafecode, 
     wPragma,
     wCompileTime, wNoInit,
@@ -64,7 +64,7 @@ type
     wAcyclic, wShallow, wUnroll, wLinearScanEnd,
     wWrite, wGensym, wInject, wDirty, wInheritable, wThreadVar, wEmit, 
     wNoStackFrame,
-    wImplicitStatic, wGlobal, wHoist
+    wImplicitStatic, wGlobal, wHoist,
 
     wAuto, wBool, wCatch, wChar, wClass,
     wConst_cast, wDefault, wDelete, wDouble, wDynamic_cast,
@@ -96,7 +96,7 @@ const
   
   cppNimSharedKeywords* = {
     wAsm, wBreak, wCase, wConst, wContinue, wDo, wElse, wEnum, wExport,
-    wFor, wIf, wReturn, wStatic, wTemplate, wTry, wWhile }
+    wFor, wIf, wReturn, wStatic, wTemplate, wTry, wWhile}
 
   specialWords*: array[low(TSpecialWord)..high(TSpecialWord), string] = ["", 
     
@@ -110,7 +110,8 @@ const
     "lambda", "let",
     "macro", "method", "mixin", "mod", "nil", "not", "notin", 
     "object", "of", "or", 
-    "out", "proc", "ptr", "raise", "ref", "return", "shl", "shr", "static",
+    "out", "proc", "ptr", "raise", "ref", "return",
+    "shared", "shl", "shr", "static",
     "template", "try", "tuple", "type", "var", 
     "when", "while", "with", "without", "xor",
     "yield",
@@ -137,7 +138,7 @@ const
     "floatchecks", "nanchecks", "infchecks",
 
     "assertions", "patterns", "warnings", "hints", 
-    "optimization", "speed", "size", "none", 
+    "optimization", "raises", "writes", "reads", "size", "effects", "tags",
     "deadcodeelim", "safecode", 
     "pragma",
     "compiletime", "noinit",

@@ -1,7 +1,7 @@
 #
 #
 #           The Nimrod Compiler
-#        (c) Copyright 2012 Andreas Rumpf
+#        (c) Copyright 2013 Andreas Rumpf
 #
 #    See the file "copying.txt", included in this
 #    distribution, for details about the copyright.
@@ -126,8 +126,8 @@ type
     s: cstring               # mmap'ed file contents
     options: TOptions
     reason: TReasonForRecompile
-    modDeps: TStringSeq
-    files: TStringSeq
+    modDeps: seq[int32]
+    files: seq[int32]
     dataIdx: int             # offset of start of data section
     convertersIdx: int       # offset of start of converters section
     initIdx, interfIdx, compilerProcsIdx, methodsIdx: int
@@ -140,12 +140,13 @@ type
     memfile: TMemFile    # unfortunately there is no point in time where we
                          # can close this! XXX
     methods*: TSymSeq
+    inViewMode: bool
   
   PRodReader* = ref TRodReader
 
 var rodCompilerprocs*: TStrTable
 
-proc handleSymbolFile*(module: PSym, filename: string): PRodReader
+proc handleSymbolFile*(module: PSym): PRodReader
 # global because this is needed by magicsys
 proc loadInitSection*(r: PRodReader): PNode
 
@@ -327,12 +328,6 @@ proc decodeType(r: PRodReader, info: TLineInfo): PType =
     result.align = decodeVInt(r.s, r.pos)
   else: 
     result.align = 2
-  if r.s[r.pos] == '@': 
-    inc(r.pos)
-    result.containerID = decodeVInt(r.s, r.pos)
-  if r.s[r.pos] == '`':
-    inc(r.pos)
-    result.constraint = decodeNode(r, UnknownLineInfo())
   decodeLoc(r, result.loc, info)
   while r.s[r.pos] == '^': 
     inc(r.pos)
@@ -373,12 +368,12 @@ proc decodeSym(r: PRodReader, info: TLineInfo): PSym =
     inc(r.pos)
     id = decodeVInt(r.s, r.pos)
     setId(id)
-  else: 
+  else:
     InternalError(info, "decodeSym: no id")
   if r.s[r.pos] == '&': 
     inc(r.pos)
     ident = getIdent(decodeStr(r.s, r.pos))
-  else: 
+  else:
     InternalError(info, "decodeSym: no ident")
   #echo "decoding: {", ident.s
   result = PSym(IdTableGet(r.syms, id))
@@ -387,8 +382,14 @@ proc decodeSym(r: PRodReader, info: TLineInfo): PSym =
     result.id = id
     IdTablePut(r.syms, result, result)
     if debugIds: registerID(result)
-  elif (result.id != id): 
+  elif result.id != id:
     InternalError(info, "decodeSym: wrong id")
+  elif result.kind != skStub and not r.inViewMode:
+    # we already loaded the symbol
+    return
+  else:
+    reset(result[])
+    result.id = id
   result.kind = k
   result.name = ident         # read the rest of the symbol description:
   if r.s[r.pos] == '^': 
@@ -423,6 +424,9 @@ proc decodeSym(r: PRodReader, info: TLineInfo): PSym =
     result.offset = - 1
   decodeLoc(r, result.loc, result.info)
   result.annex = decodeLib(r, info)
+  if r.s[r.pos] == '#':
+    inc(r.pos)
+    result.constraint = decodeNode(r, UnknownLineInfo())
   if r.s[r.pos] == '(':
     if result.kind in routineKinds:
       result.ast = decodeNodeLazyBody(r, result.info, result)
@@ -498,7 +502,7 @@ proc processCompilerProcs(r: PRodReader, module: PSym) =
       IdTablePut(r.syms, s, s)
     StrTableAdd(rodCompilerProcs, s)
 
-proc processIndex(r: PRodReader, idx: var TIndex) = 
+proc processIndex(r: PRodReader; idx: var TIndex; outf: TFile = nil) = 
   var key, val, tmp: int
   inc(r.pos, 2)               # skip "(\10"
   inc(r.line)
@@ -508,10 +512,11 @@ proc processIndex(r: PRodReader, idx: var TIndex) =
       inc(r.pos)
       key = idx.lastIdxKey + tmp
       val = decodeVInt(r.s, r.pos) + idx.lastIdxVal
-    else: 
+    else:
       key = idx.lastIdxKey + 1
       val = tmp + idx.lastIdxVal
     IITablePut(idx.tab, key, val)
+    if not outf.isNil: outf.write(key, " ", val, "\n")
     idx.lastIdxKey = key
     idx.lastIdxVal = val
     setID(key)                # ensure that this id will not be used
@@ -526,7 +531,7 @@ proc cmdChangeTriggersRecompilation(old, new: TCommands): bool =
   # new command forces us to consider it here :-)
   case old
   of cmdCompileToC, cmdCompileToCpp, cmdCompileToOC,
-      cmdCompileToEcmaScript, cmdCompileToLLVM:
+      cmdCompileToJS, cmdCompileToLLVM:
     if new in {cmdDoc, cmdCheck, cmdIdeTools, cmdPretty, cmdDef,
                cmdInteractive}:
       return false
@@ -579,9 +584,10 @@ proc processRodFile(r: PRodReader, crc: TCrc32) =
       inc(r.pos, 2)           # skip "(\10"
       inc(r.line)
       while r.s[r.pos] != ')':
-        var relativePath = decodeStr(r.s, r.pos)
-        var resolvedPath = relativePath.findModule
-        r.files.add(if resolvedPath.len > 0: resolvedPath else: relativePath)
+        let relativePath = decodeStr(r.s, r.pos)
+        let resolvedPath = relativePath.findModule
+        let finalPath = if resolvedPath.len > 0: resolvedPath else: relativePath
+        r.files.add(finalPath.fileInfoIdx)
         inc(r.pos)            # skip #10
         inc(r.line)
       if r.s[r.pos] == ')': inc(r.pos)
@@ -589,7 +595,7 @@ proc processRodFile(r: PRodReader, crc: TCrc32) =
       inc(r.pos, 2)           # skip "(\10"
       inc(r.line)
       while r.s[r.pos] != ')': 
-        w = r.files[decodeVInt(r.s, r.pos)]
+        w = r.files[decodeVInt(r.s, r.pos)].toFullPath
         inc(r.pos)            # skip ' '
         inclCrc = decodeVInt(r.s, r.pos)
         if r.reason == rrNone: 
@@ -601,8 +607,8 @@ proc processRodFile(r: PRodReader, crc: TCrc32) =
       if r.s[r.pos] == ')': inc(r.pos)
     of "DEPS":
       inc(r.pos)              # skip ':'
-      while r.s[r.pos] > '\x0A': 
-        r.modDeps.add r.files[decodeVInt(r.s, r.pos)]
+      while r.s[r.pos] > '\x0A':
+        r.modDeps.add(r.files[int32(decodeVInt(r.s, r.pos))])
         if r.s[r.pos] == ' ': inc(r.pos)
     of "INTERF": 
       r.interfIdx = r.pos + 2
@@ -673,11 +679,9 @@ proc newRodReader(modfilename: string, crc: TCrc32,
       add(version, r.s[r.pos])
       inc(r.pos)
     if r.s[r.pos] == '\x0A': inc(r.pos)
-    if version == RodFileVersion: 
+    if version != RodFileVersion: 
       # since ROD files are only for caching, no backwards compatibility is
       # needed
-      processRodFile(r, crc)
-    else: 
       result = nil
   else:
     result = nil
@@ -699,10 +703,11 @@ type
     reason*: TReasonForRecompile
     rd*: PRodReader
     crc*: TCrc32
+    crcDone*: bool
 
   TFileModuleMap = seq[TFileModuleRec]
 
-var gMods: TFileModuleMap = @[]
+var gMods*: TFileModuleMap = @[]
 
 proc decodeSymSafePos(rd: PRodReader, offset: int, info: TLineInfo): PSym = 
   # all compiled modules
@@ -720,6 +725,16 @@ proc findSomeWhere(id: int) =
       if d != invalidKey:
         echo "found id ", id, " in ", gMods[i].filename
 
+proc getReader(moduleId: int): PRodReader =
+  # we can't index 'gMods' here as it's indexed by a *file index* which is not
+  # the module ID! We could introduce a mapping ID->PRodReader but I'll leave
+  # this for later versions if benchmarking shows the linear search causes
+  # problems:
+  for i in 0 .. <gMods.len:
+    result = gMods[i].rd
+    if result != nil and result.moduleId == moduleId: return result
+  return nil
+
 proc rrGetSym(r: PRodReader, id: int, info: TLineInfo): PSym = 
   result = PSym(IdTableGet(r.syms, id))
   if result == nil: 
@@ -732,25 +747,15 @@ proc rrGetSym(r: PRodReader, id: int, info: TLineInfo): PSym =
         var x = ""
         encodeVInt(id, x)
         InternalError(info, "missing from both indexes: +" & x)
-      # find the reader with the correct moduleID:
-      for i in countup(0, high(gMods)): 
-        var rd = gMods[i].rd
-        if rd != nil: 
-          if rd.moduleID == moduleID: 
-            d = IITableGet(rd.index.tab, id)
-            if d != invalidKey: 
-              result = decodeSymSafePos(rd, d, info)
-              break 
-            else:
-              var x = ""
-              encodeVInt(id, x)
-              when false: findSomeWhere(id)
-              InternalError(info, "rrGetSym: no reader found: +" & x)
-          else:
-            #if IiTableGet(rd.index.tab, id) <> invalidKey then
-            # XXX expensive check!
-            #InternalError(info,
-            #'id found in other module: +' + ropeToStr(encodeInt(id)))
+      var rd = getReader(moduleID)
+      d = IITableGet(rd.index.tab, id)
+      if d != invalidKey: 
+        result = decodeSymSafePos(rd, d, info)
+      else:
+        var x = ""
+        encodeVInt(id, x)
+        when false: findSomeWhere(id)
+        InternalError(info, "rrGetSym: no reader found: +" & x)
     else: 
       # own symbol:
       result = decodeSymSafePos(r, d, info)
@@ -789,42 +794,48 @@ proc loadMethods(r: PRodReader) =
     var d = decodeVInt(r.s, r.pos)
     r.methods.add(rrGetSym(r, d, UnknownLineInfo()))
     if r.s[r.pos] == ' ': inc(r.pos)
-  
-proc getModuleIdx(filename: string): int = 
-  for i in countup(0, high(gMods)): 
-    if gMods[i].filename == filename: return i
-  result = len(gMods)
-  setlen(gMods, result + 1)
 
-proc checkDep(filename: string): TReasonForRecompile =
-  assert(not isNil(filename)) 
-  var idx = getModuleIdx(filename)
-  if gMods[idx].reason != rrEmpty: 
+proc GetCRC*(fileIdx: int32): TCrc32 =
+  InternalAssert fileIdx >= 0 and fileIdx < gMods.len
+
+  if gMods[fileIdx].crcDone:
+    return gMods[fileIdx].crc
+  
+  result = crcFromFile(fileIdx.toFilename)
+  gMods[fileIdx].crc = result
+
+template growCache*(cache, pos) =
+  if cache.len <= pos: cache.setLen(pos+1)
+
+proc checkDep(fileIdx: int32): TReasonForRecompile =
+  assert fileIdx != InvalidFileIDX
+  growCache gMods, fileIdx
+  if gMods[fileIdx].reason != rrEmpty: 
     # reason has already been computed for this module:
-    return gMods[idx].reason
-  var crc: TCrc32 = crcFromFile(filename)
-  gMods[idx].reason = rrNone  # we need to set it here to avoid cycles
-  gMods[idx].filename = filename
-  gMods[idx].crc = crc
+    return gMods[fileIdx].reason
+  let filename = fileIdx.toFilename
+  var crc = GetCRC(fileIdx)
+  gMods[fileIdx].reason = rrNone  # we need to set it here to avoid cycles
   result = rrNone
   var r: PRodReader = nil
   var rodfile = toGeneratedFile(filename, RodExt)
-  r = newRodReader(rodfile, crc, idx)
+  r = newRodReader(rodfile, crc, fileIdx)
   if r == nil: 
     result = (if ExistsFile(rodfile): rrRodInvalid else: rrRodDoesNotExist)
   else:
+    processRodFile(r, crc)
     result = r.reason
     if result == rrNone: 
       # check modules it depends on
       # NOTE: we need to process the entire module graph so that no ID will
       # be used twice! However, compilation speed does not suffer much from
       # this, since results are cached.
-      var res = checkDep(options.libpath / addFileExt("system", nimExt))
+      var res = checkDep(SystemFileIdx)
       if res != rrNone: result = rrModDeps
-      for i in countup(0, high(r.modDeps)): 
+      for i in countup(0, high(r.modDeps)):
         res = checkDep(r.modDeps[i])
-        if res != rrNone: 
-          result = rrModDeps 
+        if res != rrNone:
+          result = rrModDeps
           # we cannot break here, because of side-effects of `checkDep`
   if result != rrNone and gVerbosity > 0:
     rawMessage(hintProcessing, reasonToFrmt[result] % filename)
@@ -832,19 +843,19 @@ proc checkDep(filename: string): TReasonForRecompile =
     # recompilation is necessary:
     if r != nil: memfiles.close(r.memFile)
     r = nil
-  gMods[idx].rd = r
-  gMods[idx].reason = result  # now we know better
+  gMods[fileIdx].rd = r
+  gMods[fileIdx].reason = result  # now we know better
   
-proc handleSymbolFile(module: PSym, filename: string): PRodReader = 
+proc handleSymbolFile(module: PSym): PRodReader = 
+  let fileIdx = module.fileIdx
   if optSymbolFiles notin gGlobalOptions: 
     module.id = getID()
     return nil
   idgen.loadMaxIds(options.gProjectPath / options.gProjectName)
 
-  discard checkDep(filename)
-  var idx = getModuleIdx(filename)
-  if gMods[idx].reason == rrEmpty: InternalError("handleSymbolFile")
-  result = gMods[idx].rd
+  discard checkDep(fileIdx)
+  if gMods[fileIdx].reason == rrEmpty: InternalError("handleSymbolFile")
+  result = gMods[fileIdx].rd
   if result != nil: 
     module.id = result.moduleID
     IdTablePut(result.syms, module, module)
@@ -854,14 +865,6 @@ proc handleSymbolFile(module: PSym, filename: string): PRodReader =
     loadMethods(result)
   else:
     module.id = getID()
-  
-proc GetCRC*(filename: string): TCrc32 = 
-  for i in countup(0, high(gMods)): 
-    if gMods[i].filename == filename: return gMods[i].crc
-  
-  result = crcFromFile(filename)
-  #var idx = getModuleIdx(filename)
-  #result = gMods[idx].crc
 
 proc rawLoadStub(s: PSym) =
   if s.kind != skStub: InternalError("loadStub")
@@ -870,7 +873,9 @@ proc rawLoadStub(s: PSym) =
   var d = IITableGet(rd.index.tab, s.id)
   if d == invalidKey: InternalError("loadStub: invalid key")
   var rs = decodeSymSafePos(rd, d, UnknownLineInfo())
-  if rs != s: 
+  if rs != s:
+    #echo "rs: ", toHex(cast[int](rs.position), int.sizeof * 2),
+    #     "\ns:  ", toHex(cast[int](s.position), int.sizeof * 2)
     InternalError(rs.info, "loadStub: wrong symbol")
   elif rs.id != theId: 
     InternalError(rs.info, "loadStub: wrong ID") 
@@ -905,3 +910,261 @@ proc getBody*(s: PSym): PNode =
   
 InitIdTable(gTypeTable)
 InitStrTable(rodCompilerProcs)
+
+# viewer:
+proc writeNode(f: TFile; n: PNode) =
+  f.write("(")
+  if n != nil:
+    f.write($n.kind)
+    if n.typ != nil:
+      f.write('^')
+      f.write(n.typ.id)
+    case n.kind
+    of nkCharLit..nkInt64Lit: 
+      if n.intVal != 0:
+        f.write('!')
+        f.write(n.intVal)
+    of nkFloatLit..nkFloat64Lit: 
+      if n.floatVal != 0.0: 
+        f.write('!')
+        f.write($n.floatVal)
+    of nkStrLit..nkTripleStrLit:
+      if n.strVal != "": 
+        f.write('!')
+        f.write(n.strVal.escape)
+    of nkIdent:
+      f.write('!')
+      f.write(n.ident.s)
+    of nkSym:
+      f.write('!')
+      f.write(n.sym.id)
+    else:
+      for i in countup(0, sonsLen(n) - 1): 
+        writeNode(f, n.sons[i])
+  f.write(")")
+
+proc writeSym(f: TFile; s: PSym) =
+  if s == nil:
+    f.write("{}\n")
+    return
+  f.write("{")
+  f.write($s.kind)
+  f.write('+')
+  f.write(s.id)
+  f.write('&')
+  f.write(s.name.s)
+  if s.typ != nil:
+    f.write('^')
+    f.write(s.typ.id)
+  if s.owner != nil:
+    f.write('*')
+    f.write(s.owner.id)
+  if s.flags != {}:
+    f.write('$')
+    f.write($s.flags)
+  if s.magic != mNone:
+    f.write('@')
+    f.write($s.magic)
+  if s.options != gOptions: 
+    f.write('!')
+    f.write($s.options)
+  if s.position != 0: 
+    f.write('%')
+    f.write($s.position)
+  if s.offset != -1:
+    f.write('`')
+    f.write($s.offset)
+  if s.constraint != nil:
+    f.write('#')
+    f.writeNode(s.constraint)
+  if s.ast != nil:
+    f.writeNode(s.ast)
+  f.write("}\n")
+
+proc writeType(f: TFile; t: PType) =
+  if t == nil:
+    f.write("[]\n")
+    return
+  f.write('[')
+  f.write($t.kind)
+  f.write('+')
+  f.write($t.id)
+  if t.n != nil: 
+    f.writeNode(t.n)
+  if t.flags != {}:
+    f.write('$')
+    f.write($t.flags)
+  if t.callConv != low(t.callConv): 
+    f.write('?')
+    f.write($t.callConv)
+  if t.owner != nil:
+    f.write('*')
+    f.write($t.owner.id)
+  if t.sym != nil:
+    f.write('&')
+    f.write(t.sym.id)
+  if t.size != -1:
+    f.write('/')
+    f.write($t.size)
+  if t.align != 2:
+    f.write('=')
+    f.write($t.align)
+  for i in countup(0, sonsLen(t) - 1): 
+    if t.sons[i] == nil: 
+      f.write("^()")
+    else:
+      f.write('^') 
+      f.write($t.sons[i].id)
+  f.write("]\n")
+
+proc viewFile(rodfile: string) =
+  var r = newRodReader(rodfile, 0, 0)
+  if r == nil:
+    rawMessage(errGenerated, "cannot open file (or maybe wrong version):" &
+       rodfile)
+    return
+  r.inViewMode = true
+  var outf = system.open(rodfile.changeFileExt(".rod.txt"), fmWrite)
+  while r.s[r.pos] != '\0':
+    let section = rdWord(r)
+    case section
+    of "CRC":
+      inc(r.pos)              # skip ':'
+      outf.writeln("CRC:", $decodeVInt(r.s, r.pos))
+    of "ID": 
+      inc(r.pos)              # skip ':'
+      r.moduleID = decodeVInt(r.s, r.pos)
+      setID(r.moduleID)
+      outf.writeln("ID:", $r.moduleID)
+    of "OPTIONS":
+      inc(r.pos)              # skip ':'
+      r.options = cast[TOptions](int32(decodeVInt(r.s, r.pos)))
+      outf.writeln("OPTIONS:", $r.options)
+    of "GOPTIONS":
+      inc(r.pos)              # skip ':'
+      let dep = cast[TGlobalOptions](int32(decodeVInt(r.s, r.pos)))
+      outf.writeln("GOPTIONS:", $dep)
+    of "CMD":
+      inc(r.pos)              # skip ':'
+      let dep = cast[TCommands](int32(decodeVInt(r.s, r.pos)))
+      outf.writeln("CMD:", $dep)
+    of "DEFINES":
+      inc(r.pos)              # skip ':'
+      var d = 0
+      outf.write("DEFINES:")
+      while r.s[r.pos] > '\x0A':
+        let w = decodeStr(r.s, r.pos)
+        inc(d)
+        outf.write(" ", w)
+        if r.s[r.pos] == ' ': inc(r.pos)
+      outf.write("\n")
+    of "FILES": 
+      inc(r.pos, 2)           # skip "(\10"
+      inc(r.line)
+      outf.write("FILES(\n")
+      while r.s[r.pos] != ')':
+        let relativePath = decodeStr(r.s, r.pos)
+        let resolvedPath = relativePath.findModule
+        let finalPath = if resolvedPath.len > 0: resolvedPath else: relativePath
+        r.files.add(finalPath.fileInfoIdx)
+        inc(r.pos)            # skip #10
+        inc(r.line)
+        outf.writeln finalPath
+      if r.s[r.pos] == ')': inc(r.pos)
+      outf.write(")\n")
+    of "INCLUDES": 
+      inc(r.pos, 2)           # skip "(\10"
+      inc(r.line)
+      outf.write("INCLUDES(\n")
+      while r.s[r.pos] != ')': 
+        let w = r.files[decodeVInt(r.s, r.pos)]
+        inc(r.pos)            # skip ' '
+        let inclCrc = decodeVInt(r.s, r.pos)
+        if r.s[r.pos] == '\x0A': 
+          inc(r.pos)
+          inc(r.line)
+        outf.write(w, " ", inclCrc, "\n")
+      if r.s[r.pos] == ')': inc(r.pos)
+      outf.write(")\n")
+    of "DEPS":
+      inc(r.pos)              # skip ':'
+      outf.write("DEPS:")
+      while r.s[r.pos] > '\x0A': 
+        let v = int32(decodeVInt(r.s, r.pos))
+        r.modDeps.add(r.files[v])
+        if r.s[r.pos] == ' ': inc(r.pos)
+        outf.write(" ", r.files[v])
+      outf.write("\n")
+    of "INTERF",  "COMPILERPROCS":
+      inc r.pos, 2
+      if section == "INTERF": r.interfIdx = r.pos
+      else: r.compilerProcsIdx = r.pos
+      outf.write(section, "(\n")
+      while (r.s[r.pos] > '\x0A') and (r.s[r.pos] != ')'):
+        let w = decodeStr(r.s, r.pos)
+        inc(r.pos)
+        let key = decodeVInt(r.s, r.pos)
+        inc(r.pos)                # #10
+        outf.write(w, " ", key, "\n")
+      if r.s[r.pos] == ')': inc r.pos
+      outf.write(")\n")
+    of "INDEX":
+      outf.write(section, "(\n")
+      processIndex(r, r.index, outf)
+      outf.write(")\n")
+    of "IMPORTS":
+      outf.write(section, "(\n")
+      processIndex(r, r.imports, outf)
+      outf.write(")\n")
+    of "CONVERTERS",  "METHODS":
+      inc r.pos
+      if section == "METHODS": r.methodsIdx = r.pos
+      else: r.convertersIdx = r.pos
+      outf.write(section, ":")
+      while r.s[r.pos] > '\x0A': 
+        let d = decodeVInt(r.s, r.pos)
+        outf.write(" ", $d)
+        if r.s[r.pos] == ' ': inc(r.pos)
+      outf.write("\n")
+    of "DATA":
+      inc(r.pos, 2)
+      r.dataIdx = r.pos
+      outf.write("DATA(\n")
+      while r.s[r.pos] != ')':
+        if r.s[r.pos] == '(':
+          outf.writeNode decodeNode(r, UnknownLineInfo())
+          outf.write("\n")
+        elif r.s[r.pos] == '[':
+          outf.writeType decodeType(r, UnknownLineInfo())
+        else:
+          outf.writeSym decodeSym(r, UnknownLineInfo())
+        if r.s[r.pos] == '\x0A':
+          inc(r.pos)
+          inc(r.line)
+      if r.s[r.pos] == ')': inc r.pos
+      outf.write(")\n")
+    of "INIT":
+      outf.write("INIT(\n")
+      inc r.pos, 2
+      r.initIdx = r.pos
+      while r.s[r.pos] > '\x0A' and r.s[r.pos] != ')': 
+        let d = decodeVInt(r.s, r.pos)
+        inc(r.pos)                # #10
+        #let p = r.pos
+        #r.pos = d + r.dataIdx
+        #outf.writeNode decodeNode(r, UnknownLineInfo())
+        #outf.write("\n")
+        #r.pos = p
+      if r.s[r.pos] == ')': inc r.pos
+      outf.write("<not supported by viewer>)\n")
+    else:
+      InternalError("invalid section: '" & section &
+                    "' at " & $r.line & " in " & r.filename)
+      skipSection(r)
+    if r.s[r.pos] == '\x0A':
+      inc(r.pos)
+      inc(r.line)
+  outf.close
+
+when isMainModule:
+  viewFile(paramStr(1).addFileExt(rodExt))

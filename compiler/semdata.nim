@@ -22,6 +22,7 @@ type
     defaultCC*: TCallingConvention
     dynlib*: PLib
     Notes*: TNoteKinds
+    otherPragmas*: PNode      # every pragma can be pushed
 
   POptionEntry* = ref TOptionEntry
   PProcCon* = ref TProcCon
@@ -35,25 +36,19 @@ type
                               # in standalone ``except`` and ``finally``
     next*: PProcCon           # used for stacking procedure contexts
   
-  TInstantiatedSymbol* {.final.} = object
-    genericSym*, instSym*: PSym
-    concreteTypes*: seq[PType]
-  
-  # If we generate an instance of a generic, we'd like to re-use that
-  # instance if possible across module boundaries. However, this is not
-  # possible if the compilation cache is enabled. So we give up then and use
-  # the caching of generics only per module, not per project.
-  TGenericsCache* {.final.} = object
-    InstTypes*: TIdTable # map PType to PType
-    generics*: seq[TInstantiatedSymbol] # a list of the things to compile
-    lastGenericIdx*: int      # used for the generics stack
-  
-  PGenericsCache* = ref TGenericsCache
+  TInstantiationPair* = object
+    genericSym*: PSym
+    inst*: PInstantiation
+
+  TExprFlag* = enum 
+    efLValue, efWantIterator, efInTypeof, efWantStmt, efDetermineType,
+    efAllowDestructor
+  TExprFlags* = set[TExprFlag]
+    
   PContext* = ref TContext
   TContext* = object of TPassContext # a context represents a module
     module*: PSym              # the module sym belonging to the context
     p*: PProcCon               # procedure context
-    generics*: PGenericsCache  # may point to a global or module-local structure
     friendModule*: PSym        # current friend module; may access private data;
                                # this is used so that generic instantiations
                                # can access private object fields
@@ -75,26 +70,30 @@ type
                                # to some new symbol in a generic instantiation
     libs*: TLinkedList         # all libs used by this module
     semConstExpr*: proc (c: PContext, n: PNode): PNode {.nimcall.} # for the pragmas
-    semExpr*: proc (c: PContext, n: PNode): PNode {.nimcall.}      # for the pragmas
+    semExpr*: proc (c: PContext, n: PNode, flags: TExprFlags = {}): PNode {.nimcall.}
+    semOperand*: proc (c: PContext, n: PNode, flags: TExprFlags = {}): PNode {.nimcall.}
     semConstBoolExpr*: proc (c: PContext, n: PNode): PNode {.nimcall.} # XXX bite the bullet
     semOverloadedCall*: proc (c: PContext, n, nOrig: PNode,
                               filter: TSymKinds): PNode {.nimcall.}
+    semTypeNode*: proc(c: PContext, n: PNode, prev: PType): PType {.nimcall.}
     includedFiles*: TIntSet    # used to detect recursive include files
-    filename*: string          # the module's filename
     userPragmas*: TStrTable
     evalContext*: PEvalContext
     UnknownIdents*: TIntSet    # ids of all unknown identifiers to prevent
                                # naming it multiple times
+    generics*: seq[TInstantiationPair] # pending list of instantiated generics to compile
+    lastGenericIdx*: int      # used for the generics stack
+    
 
-var
-  gGenericsCache: PGenericsCache # save for modularity
+proc makeInstPair*(s: PSym, inst: PInstantiation): TInstantiationPair =
+  result.genericSym = s
+  result.inst = inst
 
-proc newGenericsCache*(): PGenericsCache =
-  new(result)
-  initIdTable(result.InstTypes)
-  result.generics = @[]
+proc filename*(c: PContext): string =
+  # the module's filename
+  return c.module.filename
 
-proc newContext*(module: PSym, nimfile: string): PContext
+proc newContext*(module: PSym): PContext
 
 proc lastOptionEntry*(c: PContext): POptionEntry
 proc newOptionEntry*(): POptionEntry
@@ -151,7 +150,7 @@ proc newOptionEntry(): POptionEntry =
   result.dynlib = nil
   result.notes = gNotes
 
-proc newContext(module: PSym, nimfile: string): PContext = 
+proc newContext(module: PSym): PContext =
   new(result)
   InitSymTab(result.tab)
   result.AmbiguousSymbols = initIntset()
@@ -163,18 +162,9 @@ proc newContext(module: PSym, nimfile: string): PContext =
   result.threadEntries = @[]
   result.converters = @[]
   result.patterns = @[]
-  result.filename = nimfile
   result.includedFiles = initIntSet()
   initStrTable(result.userPragmas)
-  if optSymbolFiles notin gGlobalOptions:
-    # re-usage of generic instantiations across module boundaries is
-    # very nice for code size:
-    if gGenericsCache == nil: gGenericsCache = newGenericsCache()
-    result.generics = gGenericsCache
-  else:
-    # we have to give up and use a per-module cache for generic instantiations:
-    result.generics = newGenericsCache()
-    assert gGenericsCache == nil
+  result.generics = @[]
   result.UnknownIdents = initIntSet()
 
 proc inclSym(sq: var TSymSeq, s: PSym) =

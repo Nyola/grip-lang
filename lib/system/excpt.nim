@@ -41,7 +41,7 @@ var
     # a global variable for the root of all try blocks
   currException {.rtlThreadVar.}: ref E_Base
 
-proc pushFrame(s: PFrame) {.compilerRtl, inl.} = 
+proc pushFrame(s: PFrame) {.compilerRtl, inl, exportc: "nimFrame".} =
   s.prev = framePtr
   framePtr = s
 
@@ -51,7 +51,8 @@ proc popFrame {.compilerRtl, inl.} =
 proc setFrame(s: PFrame) {.compilerRtl, inl.} =
   framePtr = s
 
-proc pushSafePoint(s: PSafePoint) {.compilerRtl, inl.} = 
+proc pushSafePoint(s: PSafePoint) {.compilerRtl, inl.} =
+  s.hasRaiseAction = false
   s.prev = excHandler
   excHandler = s
 
@@ -134,21 +135,27 @@ proc auxWriteStackTrace(f: PFrame, s: var string) =
     it = f
     i = 0
     total = 0
-  while it != nil and i <= high(tempFrames)-(firstCalls-1):
-    # the (-1) is for a nil entry that marks where the '...' should occur
+  # setup long head:
+  while it != nil and i <= high(tempFrames)-firstCalls:
     tempFrames[i] = it
     inc(i)
     inc(total)
     it = it.prev
+  # go up the stack to count 'total':
   var b = it
   while it != nil:
     inc(total)
     it = it.prev
-  for j in 1..total-i-(firstCalls-1): 
-    if b != nil: b = b.prev
-  if total != i:
+  var skipped = 0
+  if total > len(tempFrames):
+    # skip N
+    skipped = total-i-firstCalls+1
+    for j in 1..skipped:
+      if b != nil: b = b.prev
+    # create '...' entry:
     tempFrames[i] = nil
     inc(i)
+  # setup short tail:
   while b != nil and i <= high(tempFrames):
     tempFrames[i] = b
     inc(i)
@@ -156,7 +163,7 @@ proc auxWriteStackTrace(f: PFrame, s: var string) =
   for j in countdown(i-1, 0):
     if tempFrames[j] == nil: 
       add(s, "(")
-      add(s, $(total-i-1))
+      add(s, $skipped)
       add(s, " calls omitted) ...")
     else:
       var oldLen = s.len
@@ -192,29 +199,27 @@ proc quitOrDebug() {.inline.} =
   else:
     endbStep() # call the debugger
 
-proc raiseException(e: ref E_Base, ename: CString) {.compilerRtl.} =
-  e.name = ename
-  when hasSomeStackTrace:
-    e.trace = ""
-    rawWriteStackTrace(e.trace)
+proc raiseExceptionAux(e: ref E_Base) =
   if localRaiseHook != nil:
     if not localRaiseHook(e): return
   if globalRaiseHook != nil:
     if not globalRaiseHook(e): return
   if excHandler != nil:
-    pushCurrentException(e)
-    c_longjmp(excHandler.context, 1)
+    if not excHandler.hasRaiseAction or excHandler.raiseAction(e):
+      pushCurrentException(e)
+      c_longjmp(excHandler.context, 1)
   elif e[] of EOutOfMemory:
-    writeToStdErr(ename)
+    writeToStdErr(e.name)
     quitOrDebug()
   else:
     when hasSomeStackTrace:
       var buf = newStringOfCap(2000)
-      rawWriteStackTrace(buf)
+      if isNil(e.trace): rawWriteStackTrace(buf)
+      else: add(buf, e.trace)
       add(buf, "Error: unhandled exception: ")
       if not isNil(e.msg): add(buf, e.msg)
       add(buf, " [")
-      add(buf, $ename)
+      add(buf, $e.name)
       add(buf, "]\n")
       writeToStdErr(buf)
     else:
@@ -230,16 +235,23 @@ proc raiseException(e: ref E_Base, ename: CString) {.compilerRtl.} =
       add(buf, "Error: unhandled exception: ")
       if not isNil(e.msg): add(buf, e.msg)
       add(buf, " [")
-      xadd(buf, ename, c_strlen(ename))
+      xadd(buf, e.name, c_strlen(e.name))
       add(buf, "]\n")
       writeToStdErr(buf)
     quitOrDebug()
+
+proc raiseException(e: ref E_Base, ename: CString) {.compilerRtl.} =
+  e.name = ename
+  when hasSomeStackTrace:
+    e.trace = ""
+    rawWriteStackTrace(e.trace)
+  raiseExceptionAux(e)
 
 proc reraiseException() {.compilerRtl.} =
   if currException == nil:
     raise newException(ENoExceptionToReraise, "no exception to reraise")
   else:
-    raiseException(currException, currException.name)
+    raiseExceptionAux(currException)
 
 proc WriteStackTrace() =
   when hasSomeStackTrace:

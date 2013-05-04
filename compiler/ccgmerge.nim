@@ -11,7 +11,7 @@
 ## is needed for incremental compilation.
 
 import
-  ast, astalgo, ropes, options, strutils, lexbase, msgs, cgendata, rodutils,
+  ast, astalgo, ropes, options, strutils, nimlexbase, msgs, cgendata, rodutils,
   intsets, platform, llstream
 
 # Careful! Section marks need to contain a tabulator so that they cannot
@@ -44,9 +44,9 @@ const
     cpsStmts: "NIM_merge_PROC_BODY"
   ]
   NimMergeEndMark = "/*\tNIM_merge_END:*/"
-  
+
 proc genSectionStart*(fs: TCFileSection): PRope =
-  if optSymbolFiles in gGlobalOptions:
+  if compilationCachePresent:
     result = toRope(tnl)
     app(result, "/*\t")
     app(result, CFileSectionNames[fs])
@@ -54,11 +54,11 @@ proc genSectionStart*(fs: TCFileSection): PRope =
     app(result, tnl)
 
 proc genSectionEnd*(fs: TCFileSection): PRope =
-  if optSymbolFiles in gGlobalOptions:
+  if compilationCachePresent:
     result = toRope(NimMergeEndMark & tnl)
 
 proc genSectionStart*(ps: TCProcSection): PRope =
-  if optSymbolFiles in gGlobalOptions:
+  if compilationCachePresent:
     result = toRope(tnl)
     app(result, "/*\t")
     app(result, CProcSectionNames[ps])
@@ -66,7 +66,7 @@ proc genSectionStart*(ps: TCProcSection): PRope =
     app(result, tnl)
 
 proc genSectionEnd*(ps: TCProcSection): PRope =
-  if optSymbolFiles in gGlobalOptions:
+  if compilationCachePresent:
     result = toRope(NimMergeEndMark & tnl)
 
 proc writeTypeCache(a: TIdTable, s: var string) =
@@ -119,8 +119,8 @@ proc skipWhite(L: var TBaseLexer) =
   var pos = L.bufpos
   while true:
     case ^pos
-    of CR: pos = lexbase.HandleCR(L, pos)
-    of LF: pos = lexbase.HandleLF(L, pos)
+    of CR: pos = nimlexbase.HandleCR(L, pos)
+    of LF: pos = nimlexbase.HandleLF(L, pos)
     of ' ': inc pos
     else: break
   L.bufpos = pos
@@ -129,8 +129,8 @@ proc skipUntilCmd(L: var TBaseLexer) =
   var pos = L.bufpos
   while true:
     case ^pos
-    of CR: pos = lexbase.HandleCR(L, pos)
-    of LF: pos = lexbase.HandleLF(L, pos)
+    of CR: pos = nimlexbase.HandleCR(L, pos)
+    of LF: pos = nimlexbase.HandleLF(L, pos)
     of '\0': break
     of '/': 
       if ^(pos+1) == '*' and ^(pos+2) == '\t':
@@ -145,20 +145,47 @@ proc atEndMark(buf: cstring, pos: int): bool =
   while s < NimMergeEndMark.len and buf[pos+s] == NimMergeEndMark[s]: inc s
   result = s == NimMergeEndMark.len
 
+when false:
+  proc readVerbatimSection(L: var TBaseLexer): PRope = 
+    var pos = L.bufpos
+    var buf = L.buf
+    result = newMutableRope(30_000)
+    while true:
+      case buf[pos]
+      of CR:
+        pos = nimlexbase.HandleCR(L, pos)
+        buf = L.buf
+        result.data.add(tnl)
+      of LF:
+        pos = nimlexbase.HandleLF(L, pos)
+        buf = L.buf
+        result.data.add(tnl)
+      of '\0':
+        InternalError("ccgmerge: expected: " & NimMergeEndMark)
+        break
+      else: 
+        if atEndMark(buf, pos):
+          inc pos, NimMergeEndMark.len
+          break
+        result.data.add(buf[pos])
+        inc pos
+    L.bufpos = pos
+    freezeMutableRope(result)
+
 proc readVerbatimSection(L: var TBaseLexer): PRope = 
   var pos = L.bufpos
   var buf = L.buf
-  result = newMutableRope(30_000)
+  var r = newStringOfCap(30_000)
   while true:
     case buf[pos]
     of CR:
-      pos = lexbase.HandleCR(L, pos)
+      pos = nimlexbase.HandleCR(L, pos)
       buf = L.buf
-      result.data.add(tnl)
+      r.add(tnl)
     of LF:
-      pos = lexbase.HandleLF(L, pos)
+      pos = nimlexbase.HandleLF(L, pos)
       buf = L.buf
-      result.data.add(tnl)
+      r.add(tnl)
     of '\0':
       InternalError("ccgmerge: expected: " & NimMergeEndMark)
       break
@@ -166,10 +193,10 @@ proc readVerbatimSection(L: var TBaseLexer): PRope =
       if atEndMark(buf, pos):
         inc pos, NimMergeEndMark.len
         break
-      result.data.add(buf[pos])
+      r.add(buf[pos])
       inc pos
   L.bufpos = pos
-  freezeMutableRope(result)
+  result = r.toRope
 
 proc readKey(L: var TBaseLexer, result: var string) =
   var pos = L.bufpos

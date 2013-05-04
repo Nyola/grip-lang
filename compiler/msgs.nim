@@ -1,14 +1,14 @@
 #
 #
 #           The Nimrod Compiler
-#        (c) Copyright 2012 Andreas Rumpf
+#        (c) Copyright 2013 Andreas Rumpf
 #
 #    See the file "copying.txt", included in this
 #    distribution, for details about the copyright.
 #
 
 import
-  options, strutils, os, tables, sockets
+  options, strutils, os, tables, sockets, ropes, platform
 
 type 
   TMsgKind* = enum
@@ -86,7 +86,9 @@ type
     errInvalidCommandX, errXOnlyAtModuleScope, 
     errXNeedsParamObjectType,
     errTemplateInstantiationTooNested, errInstantiationFrom, 
-    errInvalidIndexValueForTuple, errCommandExpectsFilename, errXExpected, 
+    errInvalidIndexValueForTuple, errCommandExpectsFilename,
+    errMainModuleMustBeSpecified,
+    errXExpected, 
     errInvalidSectionStart, errGridTableNotImplemented, errGeneralParseError, 
     errNewSectionExpected, errWhitespaceExpected, errXisNoValidIndexFile, 
     errCannotRenderX, errVarVarTypeNotAllowed, errInstantiateXExplicitely,
@@ -107,7 +109,7 @@ type
     warnUnknownSubstitutionX, warnLanguageXNotSupported, warnCommentXIgnored, 
     warnNilStatement, warnAnalysisLoophole,
     warnDifferentHeaps, warnWriteToForeignHeap, warnImplicitClosure,
-    warnEachIdentIsTuple, warnUser,
+    warnEachIdentIsTuple, warnShadowIdent, warnUser,
     hintSuccess, hintSuccessX, 
     hintLineTooLong, hintXDeclaredButNotUsed, hintConvToBaseNotNeeded, 
     hintConvFromXtoItselfNotNeeded, hintExprAlwaysX, hintQuitCalled, 
@@ -140,7 +142,7 @@ const
     errNumberOutOfRange: "number $1 out of valid range", 
     errNnotAllowedInCharacter: "\\n not allowed in character literal", 
     errClosingBracketExpected: "closing ']' expected, but end of file reached", 
-    errMissingFinalQuote: "missing final \'", 
+    errMissingFinalQuote: "missing final \' for character literal", 
     errIdentifierExpected: "identifier expected, but found \'$1\'", 
     errNewlineExpected: "newline expected, but found \'$1\'",
     errInvalidModuleName: "invalid module name: '$1'",
@@ -309,6 +311,7 @@ const
     errInstantiationFrom: "instantiation from here", 
     errInvalidIndexValueForTuple: "invalid index value for tuple subscript", 
     errCommandExpectsFilename: "command expects a filename argument",
+    errMainModuleMustBeSpecified: "please, specify a main module in the project configuration file",
     errXExpected: "\'$1\' expected", 
     errInvalidSectionStart: "invalid section start",
     errGridTableNotImplemented: "grid table is not implemented", 
@@ -359,6 +362,7 @@ const
     warnWriteToForeignHeap: "write to foreign heap [WriteToForeignHeap]",
     warnImplicitClosure: "implicit closure convention: '$1' [ImplicitClosure]",
     warnEachIdentIsTuple: "each identifier is a tuple [EachIdentIsTuple]",
+    warnShadowIdent: "shadowed identifier: '$1' [ShadowIdent]",
     warnUser: "$1 [User]", 
     hintSuccess: "operation successful [Success]", 
     hintSuccessX: "operation successful ($# lines compiled; $# sec total; $#) [SuccessX]", 
@@ -378,14 +382,14 @@ const
     hintUser: "$1 [User]"]
 
 const
-  WarningsToStr*: array[0..18, string] = ["CannotOpenFile", "OctalEscape", 
+  WarningsToStr*: array[0..19, string] = ["CannotOpenFile", "OctalEscape", 
     "XIsNeverRead", "XmightNotBeenInit",
     "Deprecated", "ConfigDeprecated",
     "SmallLshouldNotBeUsed", "UnknownMagic", 
     "RedefinitionOfLabel", "UnknownSubstitutionX", "LanguageXNotSupported", 
     "CommentXIgnored", "NilStmt",
     "AnalysisLoophole", "DifferentHeaps", "WriteToForeignHeap",
-    "ImplicitClosure", "EachIdentIsTuple", "User"]
+    "ImplicitClosure", "EachIdentIsTuple", "ShadowIdent", "User"]
 
   HintsToStr*: array[0..15, string] = ["Success", "SuccessX", "LineTooLong", 
     "XDeclaredButNotUsed", "ConvToBaseNotNeeded", "ConvFromXtoItselfNotNeeded", 
@@ -410,6 +414,14 @@ type
   TFileInfo*{.final.} = object 
     fullPath*: string          # This is a canonical full filesystem path
     projPath*: string          # This is relative to the project's root
+    
+    quotedName*: PRope         # cached quoted short name for codegen
+                               # purpoes
+    
+    lines*: seq[PRope]         # the source code of the module
+                               #   used for better error messages and
+                               #   embedding the original source in the
+                               #   generated code
 
   TLineInfo*{.final.} = object # This is designed to be as small as possible,
                                # because it is used
@@ -423,16 +435,50 @@ type
   TPos* = tuple[line, col: int16]
   
   ERecoverableError* = object of EInvalidValue
+  ESuggestDone* = object of EBase
+
+const
+  InvalidFileIDX* = int32(-1)
 
 var
   filenameToIndexTbl = initTable[string, int32]()
-  fileInfos: seq[TFileInfo] = @[]
+  fileInfos*: seq[TFileInfo] = @[]
+  SystemFileIdx*: int32
+
+proc toCChar*(c: Char): string = 
+  case c
+  of '\0'..'\x1F', '\x80'..'\xFF': result = '\\' & toOctal(c)
+  of '\'', '\"', '\\': result = '\\' & c
+  else: result = $(c)
+
+proc makeCString*(s: string): PRope =
+  # BUGFIX: We have to split long strings into many ropes. Otherwise
+  # this could trigger an InternalError(). See the ropes module for
+  # further information.
+  const 
+    MaxLineLength = 64
+  result = nil
+  var res = "\""
+  for i in countup(0, len(s) - 1):
+    if (i + 1) mod MaxLineLength == 0:
+      add(res, '\"')
+      add(res, tnl)
+      app(result, toRope(res)) # reset:
+      setlen(res, 1)
+      res[0] = '\"'
+    add(res, toCChar(s[i]))
+  add(res, '\"')
+  app(result, toRope(res))
+
 
 proc newFileInfo(fullPath, projPath: string): TFileInfo =
   result.fullPath = fullPath
   #shallow(result.fullPath)
   result.projPath = projPath
   #shallow(result.projPath)
+  result.quotedName = projPath.extractFilename.makeCString
+  if optEmbedOrigSrc in gGlobalOptions or true:
+    result.lines = @[]
 
 proc newPos*(line, col: int16): TPos =
   result.line = line
@@ -456,7 +502,8 @@ proc fileInfoIdx*(filename: string): int32 =
     result = filenameToIndexTbl[canon]
   else:
     result = fileInfos.len.int32
-    fileInfos.add(newFileInfo(canon, if pseudoPath: "" else: canon.shortenDir))
+    fileInfos.add(newFileInfo(canon, if pseudoPath: filename
+                                     else: canon.shortenDir))
     filenameToIndexTbl[canon] = result
 
 proc newLineInfo*(fileInfoIdx: int32, line, col: int): TLineInfo =
@@ -475,11 +522,16 @@ proc `<`*(lhs, rhs: TLineInfo): bool =
 fileInfos.add(newFileInfo("", "command line"))
 var gCmdLineInfo* = newLineInfo(int32(0), 1, 1)
 
+fileInfos.add(newFileInfo("", "compilation artifact"))
+var gCodegenLineInfo* = newLineInfo(int32(1), 1, 1)
+
 proc raiseRecoverableError*(msg: string) {.noinline, noreturn.} =
   raise newException(ERecoverableError, msg)
 
+proc sourceLine*(i: TLineInfo): PRope
+
 var
-  gNotes*: TNoteKinds = {low(TNoteKind)..high(TNoteKind)}
+  gNotes*: TNoteKinds = {low(TNoteKind)..high(TNoteKind)} - {warnShadowIdent}
   gErrorCounter*: int = 0     # counts the number of errors
   gHintCounter*: int = 0
   gWarnCounter*: int = 0
@@ -490,11 +542,15 @@ var
 proc SuggestWriteln*(s: string) = 
   if gSilence == 0: 
     if isNil(stdoutSocket): Writeln(stdout, s)
-    else: stdoutSocket.send(s & "\c\L")
+    else: 
+      Writeln(stdout, s)
+      stdoutSocket.send(s & "\c\L")
     
 proc SuggestQuit*() =
-  if isNil(stdoutSocket): quit(0)
-  else: stdoutSocket.send("\c\L")
+  if not isServing: quit(0)
+  elif not isNil(stdoutSocket):
+    stdoutSocket.send("\c\L")
+    raise newException(ESuggestDone, "suggest done")
   
 # this format is understood by many text editors: it is the same that
 # Borland and Freepascal use
@@ -530,19 +586,29 @@ proc getInfoContext*(index: int): TLineInfo =
   if i >=% L: result = UnknownLineInfo()
   else: result = msgContext[i]
 
-proc ToFilename*(info: TLineInfo): string =
-  if info.fileIndex < 0: result = "???"
-  else: result = fileInfos[info.fileIndex].projPath
-
-proc ToFilename*(fileIdx: int32): string =
+proc toFilename*(fileIdx: int32): string =
   if fileIdx < 0: result = "???"
   else: result = fileInfos[fileIdx].projPath
 
-proc toFullPath*(info: TLineInfo): string =
+proc toFullPath*(fileIdx: int32): string =
+  if fileIdx < 0: result = "???"
+  else: result = fileInfos[fileIdx].fullPath
+
+template toFilename*(info: TLineInfo): string =
+  info.fileIndex.toFilename
+
+template toFullPath*(info: TLineInfo): string =
+  info.fileIndex.toFullPath
+
+proc toMsgFilename*(info: TLineInfo): string =
   if info.fileIndex < 0: result = "???"
-  else: result = fileInfos[info.fileIndex].fullPath
-  
-proc ToLinenumber*(info: TLineInfo): int {.inline.} = 
+  else:
+    if gListFullPaths:
+      result = fileInfos[info.fileIndex].fullPath
+    else:
+      result = fileInfos[info.fileIndex].projPath
+
+proc toLinenumber*(info: TLineInfo): int {.inline.} = 
   result = info.line
 
 proc toColumn*(info: TLineInfo): int {.inline.} = 
@@ -618,8 +684,10 @@ proc handleError(msg: TMsgKind, eh: TErrorHandling, s: string) =
     maybeTrace()
     inc(gErrorCounter)
     options.gExitcode = 1'i8
-    if gErrorCounter >= gErrorMax or eh == doAbort: 
-      quit(1)                        # one error stops the compiler
+    if gErrorCounter >= gErrorMax: 
+      quit(1)
+    elif eh == doAbort and gCmd != cmdIdeTools:
+      quit(1)
     elif eh == doRaise:
       raiseRecoverableError(s)
 
@@ -630,7 +698,7 @@ proc writeContext(lastinfo: TLineInfo) =
   var info = lastInfo
   for i in countup(0, len(msgContext) - 1): 
     if msgContext[i] != lastInfo and msgContext[i] != info: 
-      MsgWriteln(posContextFormat % [toFilename(msgContext[i]), 
+      MsgWriteln(posContextFormat % [toMsgFilename(msgContext[i]), 
                                      coordToStr(msgContext[i].line), 
                                      coordToStr(msgContext[i].col), 
                                      getMessageStr(errInstantiationFrom, "")])
@@ -663,6 +731,11 @@ proc rawMessage*(msg: TMsgKind, arg: string) =
 var
   lastError = UnknownLineInfo()
 
+proc writeSurroundingSrc(info: TLineInfo) =
+  const indent = "  "
+  MsgWriteln(indent & info.sourceLine.data)
+  MsgWriteln(indent & repeatChar(info.col, ' ') & '^')
+
 proc liMessage(info: TLineInfo, msg: TMsgKind, arg: string, 
                eh: TErrorHandling) =
   var frmt: string
@@ -684,10 +757,12 @@ proc liMessage(info: TLineInfo, msg: TMsgKind, arg: string,
     ignoreMsg = optHints notin gOptions or msg notin gNotes
     frmt = posHintFormat
     inc(gHintCounter)
-  let s = frmt % [toFilename(info), coordToStr(info.line),
+  let s = frmt % [toMsgFilename(info), coordToStr(info.line),
                   coordToStr(info.col), getMessageStr(msg, arg)]
   if not ignoreMsg:
     MsgWriteln(s)
+    if optPrintSurroundingSrc and msg in errMin..errMax:
+      info.writeSurroundingSrc
   handleError(msg, eh, s)
   
 proc Fatal*(info: TLineInfo, msg: TMsgKind, arg = "") = 
@@ -695,6 +770,9 @@ proc Fatal*(info: TLineInfo, msg: TMsgKind, arg = "") =
 
 proc GlobalError*(info: TLineInfo, msg: TMsgKind, arg = "") = 
   liMessage(info, msg, arg, doRaise)
+
+proc GlobalError*(info: TLineInfo, arg: string) =
+  liMessage(info, errGenerated, arg, doRaise)
 
 proc LocalError*(info: TLineInfo, msg: TMsgKind, arg = "") =
   liMessage(info, msg, arg, doNothing)
@@ -718,3 +796,34 @@ template AssertNotNil*(e: expr): expr =
 
 template InternalAssert*(e: bool): stmt =
   if not e: InternalError($InstantiationInfo())
+
+proc addSourceLine*(fileIdx: int32, line: string) =
+  fileInfos[fileIdx].lines.add line.toRope
+
+proc sourceLine*(i: TLineInfo): PRope =
+  if i.fileIndex < 0: return nil
+  
+  if not optPreserveOrigSource and
+         fileInfos[i.fileIndex].lines.len == 0:
+    for line in lines(i.toFullPath):
+      addSourceLine i.fileIndex, line.string
+
+  InternalAssert i.fileIndex < fileInfos.len and
+                 i.line <= fileInfos[i.fileIndex].lines.len
+
+  result = fileInfos[i.fileIndex].lines[i.line-1]
+
+proc quotedFilename*(i: TLineInfo): PRope =
+  InternalAssert i.fileIndex >= 0
+  result = fileInfos[i.fileIndex].quotedName
+
+ropes.ErrorHandler = proc (err: TRopesError, msg: string, useWarning: bool) =
+  case err
+  of rInvalidFormatStr:
+    internalError("ropes: invalid format string: " & msg)
+  of rTokenTooLong:
+    internalError("ropes: token too long: " & msg)
+  of rCannotOpenFile:
+    rawMessage(if useWarning: warnCannotOpenFile else: errCannotOpenFile,
+               msg)
+ 

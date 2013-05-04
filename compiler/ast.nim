@@ -1,7 +1,7 @@
 #
 #
 #           The Nimrod Compiler
-#        (c) Copyright 2012 Andreas Rumpf
+#        (c) Copyright 2013 Andreas Rumpf
 #
 #    See the file "copying.txt", included in this
 #    distribution, for details about the copyright.
@@ -72,21 +72,25 @@ type
     nkDotCall,            # used to temporarily flag a nkCall node; 
                           # this is used
                           # for transforming ``s.len`` to ``len(s)``
+
     nkCommand,            # a call like ``p 2, 4`` without parenthesis
     nkCall,               # a call like p(x, y) or an operation like +(a, b)
     nkCallStrLit,         # a call with a string literal 
                           # x"abc" has two sons: nkIdent, nkRStrLit
                           # x"""abc""" has two sons: nkIdent, nkTripleStrLit
+    nkInfix,              # a call like (a + b)
+    nkPrefix,             # a call like !a
+    nkPostfix,            # something like a! (also used for visibility)
+    nkHiddenCallConv,     # an implicit type conversion via a type converter
+
     nkExprEqExpr,         # a named parameter with equals: ''expr = expr''
     nkExprColonExpr,      # a named parameter with colon: ''expr: expr''
     nkIdentDefs,          # a definition like `a, b: typeDesc = expr`
                           # either typeDesc or expr may be nil; used in
                           # formal parameters, var statements, etc.
     nkVarTuple,           # a ``var (a, b) = expr`` construct
-    nkInfix,              # a call like (a + b)
-    nkPrefix,             # a call like !a
-    nkPostfix,            # something like a! (also used for visibility)
     nkPar,                # syntactic (); may be a tuple constructor
+    nkObjConstr,          # object constructor: T(a: 1, b: 2)
     nkCurly,              # syntactic {}
     nkCurlyExpr,          # an expression like a{i}
     nkBracket,            # syntactic []
@@ -110,7 +114,6 @@ type
     nkHiddenStdConv,      # an implicit standard type conversion
     nkHiddenSubConv,      # an implicit type conversion from a subtype
                           # to a supertype
-    nkHiddenCallConv,     # an implicit type conversion via a type converter
     nkConv,               # a type conversion
     nkCast,               # a type cast
     nkStaticExpr,         # a static expr
@@ -173,6 +176,9 @@ type
     nkDiscardStmt,        # a discard statement
     nkStmtList,           # a list of statements
     nkImportStmt,         # an import statement
+    nkImportExceptStmt,   # an import x except a statement
+    nkExportStmt,         # an export statement
+    nkExportExceptStmt,   # an 'export except' statement
     nkFromStmt,           # a from * import statement
     nkIncludeStmt,        # an include statement
     nkBindStmt,           # a bind statement
@@ -199,6 +205,9 @@ type
     nkMutableTy,          # ``mutable T``
     nkDistinctTy,         # distinct type
     nkProcTy,             # proc type
+    nkIteratorTy,         # iterator type
+    nkSharedTy,           # 'shared T'
+                          # we use 'nkPostFix' for the 'not nil' addition
     nkEnumTy,             # enum body
     nkEnumFieldDef,       # `ident = expr` in an enumeration
     nkArgList,            # argument list
@@ -206,7 +215,8 @@ type
     nkReturnToken,        # token used for interpretation
     nkClosure,            # (prc, env)-pair (internally used for code gen)
     nkGotoState,          # used for the state machine (for iterators)
-    nkState               # give a label to a code section (for iterators)
+    nkState,              # give a label to a code section (for iterators)
+    nkBreakState          # special break statement for easier code generation
   TNodeKinds* = set[TNodeKind]
 
 type
@@ -278,6 +288,13 @@ const
   # getting ready for the future expr/stmt merge
   nkWhen* = nkWhenStmt
   nkWhenExpr* = nkWhenStmt
+  nkEffectList* = nkArgList 
+  # hacks ahead: an nkEffectList is a node with 4 children:
+  exceptionEffects* = 0 # exceptions at position 0
+  readEffects* = 1      # read effects at position 1
+  writeEffects* = 2     # write effects at position 2
+  tagEffects* = 3       # user defined tag ('gc', 'time' etc.)
+  effectListLen* = 4    # list of effects list
 
 type
   TTypeKind* = enum  # order is important!
@@ -288,6 +305,11 @@ type
     tyGenericInvokation, # ``T[a, b]`` for types to invoke
     tyGenericBody,       # ``T[a, b, body]`` last parameter is the body
     tyGenericInst,       # ``T[a, b, realInstance]`` instantiated generic type
+                         # realInstance will be a concrete type like tyObject
+                         # unless this is an instance of a generic alias type.
+                         # then realInstance will be the tyGenericInst of the
+                         # completely (recursively) resolved alias.
+                         
     tyGenericParam,      # ``a`` in the above patterns
     tyDistinct,
     tyEnum,
@@ -332,7 +354,7 @@ type
     nfSem       # node has been checked for semantics
 
   TNodeFlags* = set[TNodeFlag]
-  TTypeFlag* = enum   # keep below 15 for efficiency reasons (now: 14)
+  TTypeFlag* = enum   # keep below 32 for efficiency reasons (now: 19)
     tfVarargs,        # procedure has C styled varargs
     tfNoSideEffect,   # procedure type does not allow side effects
     tfFinal,          # is the object final?
@@ -344,19 +366,22 @@ type
     tfFromGeneric,    # type is an instantiation of a generic; this is needed
                       # because for instantiations of objects, structural
                       # type equality has to be used
-    tfInstantiated    # XXX: used to mark generic params after instantiation.
+    tfInstantiated,   # XXX: used to mark generic params after instantiation.
                       # if the concrete type happens to be an implicit generic
                       # this can lead to invalid proc signatures in the second
                       # pass of semProcTypeNode performed after instantiation.
                       # this won't be needed if we don't perform this redundant
                       # second pass (stay tuned).
-    tfRetType         # marks return types in proc (used to detect type classes 
+    tfRetType,        # marks return types in proc (used to detect type classes 
                       # used as return types for return type inference)
     tfAll,            # type class requires all constraints to be met (default)
     tfAny,            # type class requires any constraint to be met
     tfCapturesEnv,    # whether proc really captures some environment
     tfByCopy,         # pass object/tuple by copy (C backend)
-    tfByRef           # pass object/tuple by reference (C backend)
+    tfByRef,          # pass object/tuple by reference (C backend)
+    tfIterator,       # type is really an iterator, not a tyProc
+    tfShared,         # type is 'shared'
+    tfNotNil          # type cannot be 'nil'
 
   TTypeFlags* = set[TTypeFlag]
 
@@ -397,6 +422,9 @@ const
     skMacro, skTemplate}
   tfIncompleteStruct* = tfVarargs
   skError* = skUnknown
+  
+  # type flags that are essential for type equality:
+  eqTypeFlags* = {tfIterator, tfShared, tfNotNil}
 
 type
   TMagic* = enum # symbols that require compiler magic:
@@ -404,7 +432,7 @@ type
     mDefined, mDefinedInScope, mCompiles,
     mLow, mHigh, mSizeOf, mTypeTrait, mIs, mOf,
     mEcho, mShallowCopy, mSlurp, mStaticExec,
-    mParseExprToAst, mParseStmtToAst, mExpandToAst,
+    mParseExprToAst, mParseStmtToAst, mExpandToAst, mQuoteAst,
     mUnaryLt, mSucc, 
     mPred, mInc, mDec, mOrd, mNew, mNewFinalize, mNewSeq, mLengthOpenArray, 
     mLengthStr, mLengthArray, mLengthSeq, mIncl, mExcl, mCard, mChr, mGCref, 
@@ -428,12 +456,12 @@ type
     mIntToStr, mInt64ToStr, mFloatToStr, mCStrToStr, mStrToStr, mEnumToStr, 
     mAnd, mOr, mEqStr, mLeStr, mLtStr, mEqSet, mLeSet, mLtSet, mMulSet, 
     mPlusSet, mMinusSet, mSymDiffSet, mConStrStr, mConArrArr, mConArrT, 
-    mConTArr, mConTT, mSlice, 
+    mConTArr, mConTT, mSlice,
     mFields, mFieldPairs, mOmpParFor,
-    mAppendStrCh, mAppendStrStr, mAppendSeqElem, 
-    mInRange, mInSet, mRepr, mExit, mSetLengthStr, mSetLengthSeq, 
-    mIsPartOf, mAstToStr, mRand, 
-    mSwap, mIsNil, mArrToSeq, mCopyStr, mCopyStrLast, 
+    mAppendStrCh, mAppendStrStr, mAppendSeqElem,
+    mInRange, mInSet, mRepr, mExit, mSetLengthStr, mSetLengthSeq,
+    mIsPartOf, mAstToStr, mRand,
+    mSwap, mIsNil, mArrToSeq, mCopyStr, mCopyStrLast,
     mNewString, mNewStringOfCap,
     mReset,
     mArray, mOpenArray, mRange, mSet, mSeq, mVarargs,
@@ -442,18 +470,18 @@ type
     mUInt, mUInt8, mUInt16, mUInt32, mUInt64,
     mFloat, mFloat32, mFloat64, mFloat128,
     mBool, mChar, mString, mCstring,
-    mPointer, mEmptySet, mIntSetBaseType, mNil, mExpr, mStmt, mTypeDesc, 
+    mPointer, mEmptySet, mIntSetBaseType, mNil, mExpr, mStmt, mTypeDesc,
     mVoidType, mPNimrodNode,
-    mIsMainModule, mCompileDate, mCompileTime, mNimrodVersion, mNimrodMajor, 
-    mNimrodMinor, mNimrodPatch, mCpuEndian, mHostOS, mHostCPU, mAppType, 
-    mNaN, mInf, mNegInf, 
+    mIsMainModule, mCompileDate, mCompileTime, mNimrodVersion, mNimrodMajor,
+    mNimrodMinor, mNimrodPatch, mCpuEndian, mHostOS, mHostCPU, mAppType,
+    mNaN, mInf, mNegInf,
     mCompileOption, mCompileOptionArg,
-    mNLen, mNChild, mNSetChild, mNAdd, mNAddMultiple, mNDel, mNKind, 
-    mNIntVal, mNFloatVal, mNSymbol, mNIdent, mNGetType, mNStrVal, mNSetIntVal, 
+    mNLen, mNChild, mNSetChild, mNAdd, mNAddMultiple, mNDel, mNKind,
+    mNIntVal, mNFloatVal, mNSymbol, mNIdent, mNGetType, mNStrVal, mNSetIntVal,
     mNSetFloatVal, mNSetSymbol, mNSetIdent, mNSetType, mNSetStrVal, mNLineInfo,
-    mNNewNimNode, mNCopyNimNode, mNCopyNimTree, mStrToIdent, mIdentToStr, 
-    mNBindSym, mNCallSite,
-    mEqIdent, mEqNimrodNode, mNHint, mNWarning, mNError, 
+    mNNewNimNode, mNCopyNimNode, mNCopyNimTree, mStrToIdent, mIdentToStr,
+    mNBindSym, mLocals, mNCallSite,
+    mEqIdent, mEqNimrodNode, mNHint, mNWarning, mNError,
     mInstantiationInfo, mGetTypeInfo
 
 # things that we can evaluate safely at compile time, even if not asked for it:
@@ -496,7 +524,7 @@ type
   TNodeSeq* = seq[PNode]
   PType* = ref TType
   PSym* = ref TSym
-  TNode*{.acyclic, final.} = object # on a 32bit machine, this takes 32 bytes
+  TNode*{.final, acyclic.} = object # on a 32bit machine, this takes 32 bytes
     typ*: PType
     comment*: string
     info*: TLineInfo
@@ -557,6 +585,9 @@ type
     flags*: TLocFlags         # location's flags
     t*: PType                 # type of location
     r*: PRope                 # rope value of location (code generators)
+    heapRoot*: PRope          # keeps track of the enclosing heap object that
+                              # owns this location (required by GC algorithms
+                              # employing heap snapshots or sliding views)
     a*: int                   # location's "address", i.e. slot for temporaries
 
   # ---------------- end of backend information ------------------------------
@@ -566,13 +597,36 @@ type
   TLib* = object of lists.TListEntry # also misused for headers!
     kind*: TLibKind
     generated*: bool          # needed for the backends:
+    isOverriden*: bool
     name*: PRope
     path*: PNode              # can be a string literal!
-    
-
+  
+  TInstantiation* = object
+    sym*: PSym
+    concreteTypes*: seq[PType]
+    usedBy*: seq[int32]       # list of modules using the generic
+                              # needed in caas mode for purging the cache
+                              # XXX: it's possible to switch to a 
+                              # simple ref count here
+  
+  PInstantiation* = ref TInstantiation
+      
   PLib* = ref TLib
-  TSym* = object of TIdObj
-    kind*: TSymKind
+  TSym* {.acyclic.} = object of TIdObj
+    # proc and type instantiations are cached in the generic symbol
+    case kind*: TSymKind
+    of skType:
+      typeInstCache*: seq[PType]
+    of routineKinds:
+      procInstCache*: seq[PInstantiation]
+    of skModule:
+      # modules keep track of the generic symbols they use from other modules.
+      # this is because in incremental compilation, when a module is about to
+      # be replaced with a newer version, we must decrement the usage count
+      # of all previously used generics.
+      usedGenerics*: seq[PInstantiation]
+    else: nil
+
     magic*: TMagic
     typ*: PType
     name*: PIdent
@@ -597,15 +651,18 @@ type
                               # for a conditional:
                               # 1 iff the symbol is defined, else 0
                               # (or not in symbol table)
-                              # for modules, a unique index corresponding
-                              # to the order of compilation 
+                              # for modules, an unique index corresponding
+                              # to the module's fileIdx
+
     offset*: int              # offset of record field
     loc*: TLoc
     annex*: PLib              # additional fields (seldom used, so we use a
                               # reference to another object to safe space)
+    constraint*: PNode        # additional constraints like 'lit|result'
   
   TTypeSeq* = seq[PType]
-  TType* = object of TIdObj   # types are identical iff they have the
+  TType* {.acyclic.} = object of TIdObj # \
+                              # types are identical iff they have the
                               # same id; there may be multiple copies of a type
                               # in memory!
     kind*: TTypeKind          # kind of type
@@ -627,9 +684,7 @@ type
     size*: BiggestInt         # the size of the type in bytes
                               # -1 means that the size is unkwown
     align*: int               # the type's alignment requirements
-    containerID*: int         # used for type checking of generics
     loc*: TLoc
-    constraint*: PNode        # additional constraints like 'lit|result'
 
   TPair*{.final.} = object 
     key*, val*: PObject
@@ -697,6 +752,8 @@ const
     tyFloat..tyFloat128, tyUInt..tyUInt64}
   ConstantDataTypes*: TTypeKinds = {tyArrayConstr, tyArray, tySet, 
                                     tyTuple, tySequence}
+  NilableTypes*: TTypeKinds = {tyPointer, tyCString, tyRef, tyPtr, tySequence,
+    tyProc, tyString, tyError}
   ExportableSymKinds* = {skVar, skConst, skProc, skMethod, skType, skIterator, 
     skMacro, skTemplate, skConverter, skEnumField, skLet, skStub}
   PersistentNodeFlags*: TNodeFlags = {nfBase2, nfBase8, nfBase16, nfAllConst}
@@ -711,11 +768,13 @@ const
   dispatcherPos* = 8 # caution: if method has no 'result' it can be position 5!
 
   nkCallKinds* = {nkCall, nkInfix, nkPrefix, nkPostfix,
-                  nkCommand, nkCallStrLit}
+                  nkCommand, nkCallStrLit, nkHiddenCallConv}
 
   nkLambdaKinds* = {nkLambda, nkDo}
+  nkSymChoices* = {nkClosedSymChoice, nkOpenSymChoice}
+  nkStrKinds* = {nkStrLit..nkTripleStrLit}
 
-  skLocalVars* = {skVar, skLet, skForVar, skParam}
+  skLocalVars* = {skVar, skLet, skForVar, skParam, skResult}
 
 
 # creator procs:
@@ -801,6 +860,14 @@ proc linkTo*(s: PSym, t: PType): PSym {.discardable.} =
   t.sym = s
   s.typ = t
   result = s
+
+template fileIdx*(c: PSym): int32 =
+  # XXX: this should be used only on module symbols
+  c.position.int32
+
+template filename*(c: PSym): string =
+  # XXX: this should be used only on module symbols
+  c.position.int32.toFileName
 
 proc appendToModule*(m: PSym, n: PNode) =
   ## The compiler will use this internally to add nodes that will be
@@ -953,7 +1020,6 @@ proc assignType(dest, src: PType) =
   dest.n = src.n
   dest.size = src.size
   dest.align = src.align
-  dest.containerID = src.containerID
   dest.destructor = src.destructor
   # this fixes 'type TLock = TSysLock':
   if src.sym != nil:

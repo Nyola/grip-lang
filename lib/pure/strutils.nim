@@ -186,7 +186,24 @@ iterator split*(s: string, seps: set[char] = Whitespace): string =
   ##   for word in split(";;this;is;an;;example;;;", {';'}):
   ##     writeln(stdout, word)
   ##
-  ## produces the same output.
+  ## produces the same output. The code:
+  ##
+  ## .. code-block:: nimrod
+  ##   let date = "2012-11-20T22:08:08.398990"
+  ##   let separators = {' ', '-', ':', 'T'}
+  ##   for number in split(date, separators):
+  ##     writeln(stdout, number)
+  ##
+  ## Results in:
+  ##
+  ## .. code-block:: nimrod
+  ##   "2012"
+  ##   "11"
+  ##   "20"
+  ##   "22"
+  ##   "08"
+  ##   "08.398990"
+  ##
   var last = 0
   assert(not ('\0' in seps))
   while last < len(s):
@@ -398,7 +415,15 @@ proc parseEnum*[T: enum](s: string, default: T): T =
 proc repeatChar*(count: int, c: Char = ' '): string {.noSideEffect,
   rtl, extern: "nsuRepeatChar".} =
   ## Returns a string of length `count` consisting only of
-  ## the character `c`.
+  ## the character `c`. You can use this proc to left align strings. Example:
+  ##
+  ## .. code-block:: nimrod
+  ##   let
+  ##     width = 15
+  ##     text1 = "Hello user!"
+  ##     text2 = "This is a very long string"
+  ##   echo text1 & repeatChar(max(0, width - text1.len)) & "|"
+  ##   echo text2 & repeatChar(max(0, width - text2.len)) & "|"
   result = newString(count)
   for i in 0..count-1: result[i] = c
 
@@ -412,7 +437,8 @@ proc align*(s: string, count: int): string {.
   noSideEffect, rtl, extern: "nsuAlignString".} =
   ## Aligns a string `s` with spaces, so that is of length `count`. Spaces are
   ## added before `s` resulting in right alignment. If ``s.len >= count``, no
-  ## spaces are added and `s` is returned unchanged.
+  ## spaces are added and `s` is returned unchanged. If you need to left align
+  ## a string use the repeatChar proc.
   if s.len < count:
     result = newString(count)
     var spaces = count - s.len
@@ -737,7 +763,7 @@ proc replaceWord*(s, sub: string, by = ""): string {.noSideEffect,
     else:
       add result, substr(s, i, j)
       i = j + 1
-    # copy the rest:
+  # copy the rest:
   add result, substr(s, i)
 
 proc delete*(s: var string, first, last: int) {.noSideEffect,
@@ -833,13 +859,51 @@ proc escape*(s: string, prefix = "\"", suffix = "\""): string {.noSideEffect,
   for c in items(s):
     case c
     of '\0'..'\31', '\128'..'\255':
-      add(result, '\\')
+      add(result, "\\x")
       add(result, toHex(ord(c), 2))
     of '\\': add(result, "\\\\")
     of '\'': add(result, "\\'")
     of '\"': add(result, "\\\"")
     else: add(result, c)
   add(result, suffix)
+
+proc unescape*(s: string, prefix = "\"", suffix = "\""): string {.noSideEffect,
+  rtl, extern: "nsuUnescape".} =
+  ## Unescapes a string `s`. This complements ``escape`` as it performs the
+  ## opposite operations.
+  ##
+  ## If `s` does not begin with ``prefix`` and end with ``suffix`` a EInvalidValue
+  ## exception will be raised.
+  result = newStringOfCap(s.len)
+  var i = 0
+  if s[0 .. prefix.len-1] != prefix:
+    raise newException(EInvalidValue,
+                       "String does not start with a prefix of: " & prefix)
+  i.inc()
+  while True:
+    if i == s.len-suffix.len: break
+    case s[i]
+    of '\\':
+      case s[i+1]:
+      of 'x':
+        let j = parseHexInt(s[i+2 .. i+3])
+        result.add(chr(j))
+        inc(i, 2)
+      of '\\':
+        result.add('\\')
+      of '\'':
+        result.add('\'')
+      of '\"':
+        result.add('\"')
+      else: result.add("\\" & s[i+1])
+      inc(i)
+    of '\0': break
+    else:
+      result.add(s[i])
+    i.inc()
+  if s[i .. -1] != suffix:
+    raise newException(EInvalidValue,
+                       "String does not end with a suffix of: " & suffix)
 
 proc validIdentifier*(s: string): bool {.noSideEffect,
   rtl, extern: "nsuValidIdentifier".} =

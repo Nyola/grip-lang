@@ -39,21 +39,23 @@
 
 ## OpenSSL support
 
+{.deadCodeElim: on.}
+
 when defined(WINDOWS): 
   const 
     DLLSSLName = "(ssleay32|libssl32).dll"
     DLLUtilName = "libeay32.dll"
 else:
   const
-    versions = "(|.0.9.9|.0.9.8|.0.9.7|.0.9.6|.0.9.5|.0.9.4|.0.9.3|.0.9.2)"
-  when defined(posix):
+    versions = "(|.1.0.0|.0.9.9|.0.9.8|.0.9.7|.0.9.6|.0.9.5|.0.9.4)"
+  when defined(macosx):
+    const
+      DLLSSLName = "libssl" & versions & ".dylib"
+      DLLUtilName = "libcrypto" & versions & ".dylib"
+  else:
     const 
       DLLSSLName = "libssl.so" & versions
       DLLUtilName = "libcrypto.so" & versions
-  else: 
-    const 
-      DLLSSLName = "libssl.dylib" & versions
-      DLLUtilName = "libcrypto.dylib" & versions
 
 type 
   SslStruct {.final, pure.} = object
@@ -231,6 +233,7 @@ proc SSL_read*(ssl: PSSL, buf: pointer, num: int): cint{.cdecl, dynlib: DLLSSLNa
 proc SSL_write*(ssl: PSSL, buf: cstring, num: int): cint{.cdecl, dynlib: DLLSSLName, importc.}
 proc SSL_get_error*(s: PSSL, ret_code: cInt): cInt{.cdecl, dynlib: DLLSSLName, importc.}
 proc SSL_accept*(ssl: PSSL): cInt{.cdecl, dynlib: DLLSSLName, importc.}
+proc SSL_pending*(ssl: PSSL): cInt{.cdecl, dynlib: DLLSSLName, importc.}
 
 proc BIO_new_ssl_connect*(ctx: PSSL_CTX): PBIO{.cdecl,
     dynlib: DLLSSLName, importc.}
@@ -321,7 +324,6 @@ else:
       dynlib: DLLSSLName, importc.}
   proc SslWrite*(ssl: PSSL, buf: SslPtr, num: cInt): cInt{.cdecl, 
       dynlib: DLLSSLName, importc.}
-  proc SslPending*(ssl: PSSL): cInt{.cdecl, dynlib: DLLSSLName, importc.}
   proc SslGetVersion*(ssl: PSSL): cstring{.cdecl, dynlib: DLLSSLName, importc.}
   proc SslGetPeerCertificate*(ssl: PSSL): PX509{.cdecl, dynlib: DLLSSLName, 
       importc.}

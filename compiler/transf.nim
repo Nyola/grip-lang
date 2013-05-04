@@ -1,7 +1,7 @@
 #
 #
 #           The Nimrod Compiler
-#        (c) Copyright 2012 Andreas Rumpf
+#        (c) Copyright 2013 Andreas Rumpf
 #
 #    See the file "copying.txt", included in this
 #    distribution, for details about the copyright.
@@ -20,7 +20,7 @@
 import 
   intsets, strutils, lists, options, ast, astalgo, trees, treetab, msgs, os, 
   idents, renderer, types, passes, semfold, magicsys, cgmeth, rodread,
-  lambdalifting
+  lambdalifting, sempass2
 
 const 
   genPrefix* = ":tmp"         # prefix for generated names
@@ -112,7 +112,9 @@ proc newAsgnStmt(c: PTransf, le: PNode, ri: PTransNode): PTransNode =
   result[0] = PTransNode(le)
   result[1] = ri
 
-proc transformSymAux(c: PTransf, n: PNode): PNode = 
+proc transformSymAux(c: PTransf, n: PNode): PNode =
+  if n.sym.kind == skIterator and n.sym.typ.callConv == ccClosure:
+    return liftIterSym(n)
   var b: PNode
   var tc = c.transCon
   if sfBorrow in n.sym.flags: 
@@ -148,6 +150,9 @@ proc transformVarSection(c: PTransf, v: PNode): PTransNode =
       newVar.owner = getCurrOwner(c)
       IdNodeTablePut(c.transCon.mapping, it.sons[0].sym, newSymNode(newVar))
       var defs = newTransNode(nkIdentDefs, it.info, 3)
+      if importantComments():
+        # keep documentation information:
+        pnode(defs).comment = it.comment
       defs[0] = newSymNode(newVar).PTransNode
       defs[1] = it.sons[1].PTransNode
       defs[2] = transform(c, it.sons[2])
@@ -318,10 +323,10 @@ proc transformConv(c: PTransf, n: PNode): PTransNode =
   of tyInt..tyInt64, tyEnum, tyChar, tyBool, tyUInt8..tyUInt32: 
     # we don't include uint and uint64 here as these are no ordinal types ;-)
     if not isOrdinalType(source):
-      # XXX int64 -> float conversion?
+      # float -> int conversions. ugh.
       result = transformSons(c, n)
-    elif firstOrd(dest) <= firstOrd(source) and
-        lastOrd(source) <= lastOrd(dest): 
+    elif firstOrd(n.typ) <= firstOrd(n.sons[1].typ) and
+        lastOrd(n.sons[1].typ) <= lastOrd(n.typ): 
       # BUGFIX: simply leave n as it is; we need a nkConv node,
       # but no range check:
       result = transformSons(c, n)
@@ -329,13 +334,14 @@ proc transformConv(c: PTransf, n: PNode): PTransNode =
       # generate a range check:
       if dest.kind == tyInt64 or source.kind == tyInt64: 
         result = newTransNode(nkChckRange64, n, 3)
-      else: 
+      else:
         result = newTransNode(nkChckRange, n, 3)
       dest = skipTypes(n.typ, abstractVar)
       result[0] = transform(c, n.sons[1])
       result[1] = newIntTypeNode(nkIntLit, firstOrd(dest), source).PTransNode
       result[2] = newIntTypeNode(nkIntLit, lastOrd(dest), source).PTransNode
-  of tyFloat..tyFloat128: 
+  of tyFloat..tyFloat128:
+    # XXX int64 -> float conversion?
     if skipTypes(n.typ, abstractVar).kind == tyRange: 
       result = newTransNode(nkChckRangeF, n, 3)
       dest = skipTypes(n.typ, abstractVar)
@@ -415,17 +421,23 @@ proc transformFor(c: PTransf, n: PNode): PTransNode =
   # generate access statements for the parameters (unless they are constant)
   # put mapping from formal parameters to actual parameters
   if n.kind != nkForStmt: InternalError(n.info, "transformFor")
+
+  var length = sonsLen(n)
+  var call = n.sons[length - 2]
+  if call.kind notin nkCallKinds or call.sons[0].kind != nkSym or 
+      call.sons[0].typ.callConv == ccClosure or
+      call.sons[0].sym.kind != skIterator:
+    n.sons[length-1] = transformLoopBody(c, n.sons[length-1]).pnode
+    return lambdalifting.liftForLoop(n).ptransNode
+    #InternalError(call.info, "transformFor")
+
   #echo "transforming: ", renderTree(n)
   result = newTransNode(nkStmtList, n.info, 0)
-  var length = sonsLen(n)
   var loopBody = transformLoopBody(c, n.sons[length-1])
   var v = newNodeI(nkVarSection, n.info)
   for i in countup(0, length - 3): 
     addVar(v, copyTree(n.sons[i])) # declare new vars
   add(result, v.ptransNode)
-  var call = n.sons[length - 2]
-  if call.kind notin nkCallKinds or call.sons[0].kind != nkSym:
-    InternalError(call.info, "transformFor")
   
   # Bugfix: inlined locals belong to the invoking routine, not to the invoked
   # iterator!
@@ -603,7 +615,7 @@ proc transform(c: PTransf, n: PNode): PTransNode =
     dec c.inLoop
   of nkCaseStmt: result = transformCase(c, n)
   of nkContinueStmt:
-    result = PTransNode(newNode(nkBreakStmt))
+    result = PTransNode(newNodeI(nkBreakStmt, n.info))
     var labl = c.contSyms[c.contSyms.high]
     add(result, PTransNode(newSymNode(labl)))
   of nkBreakStmt: result = transformBreak(c, n)
@@ -651,6 +663,11 @@ proc transform(c: PTransf, n: PNode): PTransNode =
       result = transformSons(c, n)
   of nkBlockStmt, nkBlockExpr:
     result = transformBlock(c, n)
+  of nkIdentDefs, nkConstDef:
+    result = transformSons(c, n)
+    # XXX comment handling really sucks:
+    if importantComments():
+      pnode(result).comment = n.comment
   else:
     result = transformSons(c, n)
   var cnst = getConstExpr(c.module, PNode(result))
@@ -680,22 +697,21 @@ when false:
     result = openTransf(module, filename)
     for m in items(rd.methods): methodDef(m, true)
 
-  proc transfPass(): TPass = 
-    initPass(result)
-    result.open = openTransf
-    result.openCached = openTransfCached
-    result.process = processTransf
-    result.close = processTransf # we need to process generics too!
+  const transfPass* = makePass(openTransf, openTransfCached,
+    processTransf, processTransf) # we need to process generics too!
   
 proc transformBody*(module: PSym, n: PNode, prc: PSym): PNode =
   if nfTransf in n.flags or prc.kind in {skTemplate, skMacro}:
     result = n
   else:
+    when useEffectSystem: trackProc(prc, n)
     var c = openTransf(module, "")
     result = processTransf(c, n)
     if prc.kind != skMacro:
       # XXX no closures yet for macros:
       result = liftLambdas(prc, result)
+    if prc.kind == skIterator and prc.typ.callConv == ccClosure:
+      result = lambdalifting.liftIterator(prc, result)
     incl(result.flags, nfTransf)
 
 proc transformStmt*(module: PSym, n: PNode): PNode =
