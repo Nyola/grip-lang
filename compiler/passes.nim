@@ -159,15 +159,16 @@ proc processImplicits(implicits: seq[string], nodeKind: TNodeKind,
     importStmt.addSon str
     if not processTopLevelStmt(importStmt, a): break
 
-type TGripProc = proc (module: PSym, filename: string, stream: PLLStream)
+type TGripProc = proc (module: PSym, fileIdx: int32, stream: PLLStream)
 var grip*: TGripProc
-  
+
 proc processModule(module: PSym, stream: PLLStream, rd: PRodReader) =
   var 
     p: TParsers
     a: TPassContextArray
     s: PLLStream
     fileIdx = module.fileIdx
+    filename = fileIdx.toFullPath
   
   if filename.endsWith(".g"):
     if stream == nil:
@@ -175,7 +176,7 @@ proc processModule(module: PSym, stream: PLLStream, rd: PRodReader) =
       if s == nil: 
         rawMessage(errCannotOpenFile, filename)
         return
-    grip(module, filename, s)
+    grip(module, fileIdx, s)
     return
 
   if rd == nil: 

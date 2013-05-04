@@ -262,7 +262,7 @@ proc myProcess(context: PPassContext, n: PNode): PNode =
       if getCurrentException() of ESuggestDone: result = nil
       else: result = ast.emptyNode
       #if gCmd == cmdIdeTools: findSuggest(c, n)
-  
+
 proc checkThreads(c: PContext) =
   if not needsGlobalAnalysis(): return
   for i in 0 .. c.threadEntries.len-1:
@@ -282,7 +282,7 @@ proc myClose(context: PPassContext, n: PNode): PNode =
   popOwner()
   popProcCon(c)
 
-include semgrip
-
 const semPass* = makePass(myOpen, myOpenCached, myProcess, myClose)
+
+include semgrip
 

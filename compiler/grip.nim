@@ -139,9 +139,9 @@ proc debugCursor(g: PGripFile, cursor: TPos) =
   echo g.lines[cursor.line]
   echo(RepeatChar(cursor.col, ' ') & "^")
 
-proc readGripFile(filename: string, stream: PLLStream): PGripFile =
+proc readGripFile(fileIdx: int32, stream: PLLStream): PGripFile =
   new(result)
-  result.fileIdx = fileInfoIdx(filename)
+  result.fileIdx = fileIdx
   result.indentMode = Unknown
   result.lines = stream.LLStreamReadAll.splitLines
   result.indents = countIndents(result.lines, result.indentMode)
@@ -681,32 +681,26 @@ proc parseCall(g: PGripFile, s, e: int): PNode =
     
   return callChain.expStack[0]
 
-proc parse(filename: string, stream: PLLStream): PNode =
+proc parse(fileIdx: int32, stream: PLLStream): PNode =
   var
-    g = readGripFile(filename, stream)
+    g = readGripFile(fileIdx, stream)
     pos = newPos(int16(0), int16(0))
   
   result = parseBlock(g, pos)
   echo "PARSE COMPLETE"
   debug result
-    
-proc carryPass(p: TPass, module: PSym, filename: string, m: TPassData): TPassData =
-  var c = p.open(module, filename)
-  result.input = p.process(c, m.input)
-  result.closeOutput = p.close(c, m.closeOutput)
 
-proc CompileGrip(module: PSym, filename: string, stream: PLLStream) =
-  var nodes = parse(filename, stream)
+proc CompileGrip(module: PSym, fileIdx: int32, stream: PLLStream) =
+  var nodes = parse(fileIdx, stream)
 
-  var nimSem = semPass()
-  var c = nimSem.open(module, filename).PContext
+  var c = PContext(semPass.open(module))
   c.InGripContext = true
   
   for i in 0.. <nodes.sonsLen:
     nodes.sons[i] = semGrip(c, nodes[i])
   
-  var passData = (input: nodes, closeOutput: nimSem.close(c, nil))
-  discard carryPass(cgenPass(), module, filename, passData)
+  var passData = (input: nodes, closeOutput: semPass.close(c, nil))
+  discard carryPass(cgenPass, module, passData)
 
 passes.grip = CompileGrip
 
