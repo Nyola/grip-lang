@@ -772,6 +772,9 @@ const
                   nkCommand, nkCallStrLit, nkHiddenCallConv}
 
   nkLambdaKinds* = {nkLambda, nkDo}
+  declarativeDefs* = {nkProcDef, nkMethodDef, nkIteratorDef, nkConverterDef}
+  procDefs* = nkLambdaKinds + declarativeDefs
+
   nkSymChoices* = {nkClosedSymChoice, nkOpenSymChoice}
   nkStrKinds* = {nkStrLit..nkTripleStrLit}
 

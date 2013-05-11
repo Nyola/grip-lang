@@ -867,8 +867,10 @@ template `=~`*(s: string, pattern: TPeg): bool =
   ##   else:
   ##     echo("syntax error")
   ##  
+  bind maxSubpatterns
   when not definedInScope(matches):
-    var matches {.inject.}: array[0..pegs.maxSubpatterns-1, string]
+    var matches {.inject.}: array[0..maxSubpatterns-1, string]
+    {.warning: "injected 'matches' might be affected by new scoping rules in 0.9.4".}
   match(s, pattern, matches)
 
 # ------------------------- more string handling ------------------------------
@@ -1717,6 +1719,7 @@ when isMainModule:
   assert match("_______ana", peg"A <- 'ana' / . A")
   assert match("abcs%%%", peg"A <- ..A / .A / '%'")
 
+  var matches: array[0..maxSubpatterns-1, string]
   if "abc" =~ peg"{'a'}'bc' 'xyz' / {\ident}":
     assert matches[0] == "abc"
   else:
@@ -1740,8 +1743,8 @@ when isMainModule:
     assert matches[0] == "a"
   else:
     assert false
-    
-  if match("abcdefg", peg"c {d} ef {g}", matches, 2): 
+
+  if match("abcdefg", peg"c {d} ef {g}", matches, 2):
     assert matches[0] == "d"
     assert matches[1] == "g"
   else:

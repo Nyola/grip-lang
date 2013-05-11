@@ -58,6 +58,46 @@ proc fitNode(c: PContext, formal: PType, arg: PNode): PNode =
     result = copyNode(arg)
     result.typ = formal
 
+var CommonTypeBegin = PType(kind: tyExpr)
+
+proc commonType*(x, y: PType): PType =
+  # new type relation that is used for array constructors,
+  # if expressions, etc.:
+  if x == nil: return x
+  if y == nil: return y
+  var a = skipTypes(x, {tyGenericInst})
+  var b = skipTypes(y, {tyGenericInst})
+  result = x
+  if a.kind in {tyExpr, tyNil}: result = y
+  elif b.kind in {tyExpr, tyNil}: result = x
+  elif a.kind == tyStmt: result = a
+  elif b.kind == tyStmt: result = b
+  elif a.kind == tyTypeDesc:
+    # turn any concrete typedesc into the abstract typedesc type
+    if a.sons == nil: result = a
+    else: result = newType(tyTypeDesc, a.owner)
+  elif b.kind in {tyArray, tyArrayConstr, tySet, tySequence} and 
+      a.kind == b.kind:
+    # check for seq[empty] vs. seq[int]
+    let idx = ord(b.kind in {tyArray, tyArrayConstr})
+    if a.sons[idx].kind == tyEmpty: return y
+    #elif b.sons[idx].kind == tyEmpty: return x
+  else:
+    var k = tyNone
+    if a.kind in {tyRef, tyPtr}:
+      k = a.kind
+      if b.kind != a.kind: return x
+      a = a.sons[0]
+      b = b.sons[0]
+    if a.kind == tyObject and b.kind == tyObject:
+      result = commonSuperclass(a, b)
+      # this will trigger an error later:
+      if result.isNil: return x
+      if k != tyNone:
+        let r = result
+        result = NewType(k, r.owner)
+        result.addSonSkipIntLit(r)
+
 proc isTopLevel(c: PContext): bool {.inline.} = 
   result = c.tab.tos <= 2
 
@@ -66,7 +106,7 @@ proc newSymS(kind: TSymKind, n: PNode, c: PContext): PSym =
 
 proc newSymG*(kind: TSymKind, n: PNode, c: PContext): PSym =
   # like newSymS, but considers gensym'ed symbols
-  if n.kind == nkSym: 
+  if n.kind == nkSym:
     result = n.sym
     InternalAssert sfGenSym in result.flags
     InternalAssert result.kind == kind

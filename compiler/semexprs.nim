@@ -19,24 +19,6 @@ proc semTemplateExpr(c: PContext, n: PNode, s: PSym, semCheck = true): PNode =
 
 proc semFieldAccess(c: PContext, n: PNode, flags: TExprFlags = {}): PNode
 
-proc performProcvarCheck(c: PContext, n: PNode, s: PSym) =
-  var smoduleId = getModule(s).id
-  if sfProcVar notin s.flags and s.typ.callConv == ccDefault and
-      smoduleId != c.module.id and smoduleId != c.friendModule.id: 
-    LocalError(n.info, errXCannotBePassedToProcVar, s.name.s)
-
-proc semProcvarCheck(c: PContext, n: PNode) =
-  let n = n.skipConv
-  if n.kind == nkSym and n.sym.kind in {skProc, skMethod, skIterator,
-                                        skConverter}:
-    performProcvarCheck(c, n, n.sym)
-
-proc semDestructorCheck(c: PContext, n: PNode, flags: TExprFlags) {.inline.} =
-  if efAllowDestructor notin flags and n.kind in nkCallKinds+{nkObjConstr}:
-    if instantiateDestructor(c, n.typ):
-      LocalError(n.info, errGenerated,
-        "usage of a type with a destructor in a non destructible context")
-
 proc semOperand(c: PContext, n: PNode, flags: TExprFlags = {}): PNode =
   # same as 'semExprWithType' but doesn't check for proc vars
   result = semExpr(c, n, flags)
@@ -420,10 +402,10 @@ proc semArrayConstr(c: PContext, n: PNode, flags: TExprFlags): PNode =
       indexType = idx.typ
       x = x.sons[1]
     
-    addSon(result, semExprWithType(c, x))
-    var typ = skipTypes(result.sons[0].typ, {tyGenericInst, tyVar, tyOrdinal})
-    # turn any concrete typedesc into the absract typedesc type
-    if typ.kind == tyTypeDesc: typ.sons = nil
+    let yy = semExprWithType(c, x)
+    var typ = yy.typ
+    addSon(result, yy)
+    #var typ = skipTypes(result.sons[0].typ, {tyGenericInst, tyVar, tyOrdinal})
     for i in countup(1, sonsLen(n) - 1): 
       x = n.sons[i]
       if x.kind == nkExprColonExpr and sonsLen(x) == 2: 
@@ -433,10 +415,15 @@ proc semArrayConstr(c: PContext, n: PNode, flags: TExprFlags): PNode =
           localError(x.info, errInvalidOrderInArrayConstructor)
         x = x.sons[1]
       
-      n.sons[i] = semExprWithType(c, x, flags*{efAllowDestructor})
-      addSon(result, fitNode(c, typ, n.sons[i]))
+      let xx = semExprWithType(c, x, flags*{efAllowDestructor})
+      result.add xx
+      typ = commonType(typ, xx.typ)
+      #n.sons[i] = semExprWithType(c, x, flags*{efAllowDestructor})
+      #addSon(result, fitNode(c, typ, n.sons[i]))
       inc(lastIndex)
     addSonSkipIntLit(result.typ, typ)
+    for i in 0 .. <result.len:
+      result.sons[i] = fitNode(c, typ, result.sons[i])
   result.typ.sons[0] = makeRangeType(c, 0, sonsLen(result) - 1, n.info)
 
 proc fixAbstractType(c: PContext, n: PNode) = 
@@ -781,16 +768,6 @@ proc buildEchoStmt(c: PContext, n: PNode): PNode =
   # and check 'arg' for semantics again:
   addSon(result, semExpr(c, arg))
 
-proc discardCheck(result: PNode) =
-  if result.typ != nil and result.typ.kind notin {tyStmt, tyEmpty}:
-    if result.kind == nkNilLit:
-      # XXX too much work and fixing would break bootstrapping:
-      #Message(n.info, warnNilStatement)
-      result.typ = nil
-    elif not ImplicitlyDiscardable(result) and result.typ.kind != tyError and
-        gCmd != cmdInteractive:
-      localError(result.info, errDiscardValue)
-
 proc semExprNoType(c: PContext, n: PNode): PNode =
   result = semExpr(c, n, {efWantStmt})
   discardCheck(result)
@@ -1125,14 +1102,16 @@ proc semAsgn(c: PContext, n: PNode): PNode =
     var
       rhs = semExprWithType(c, n.sons[1], 
         if lhsIsResult: {efAllowDestructor} else: {})
-    if lhsIsResult and lhs.sym.typ.kind == tyGenericParam:
-      if matchTypeClass(lhs.typ, rhs.typ):
-        InternalAssert c.p.resultSym != nil
-        lhs.typ = rhs.typ
-        c.p.resultSym.typ = rhs.typ
-        c.p.owner.typ.sons[0] = rhs.typ
-      else:
-        typeMismatch(n, lhs.typ, rhs.typ)
+    if lhsIsResult:
+      n.typ = EnforceVoidContext
+      if lhs.sym.typ.kind == tyGenericParam:
+        if matchTypeClass(lhs.typ, rhs.typ):
+          InternalAssert c.p.resultSym != nil
+          lhs.typ = rhs.typ
+          c.p.resultSym.typ = rhs.typ
+          c.p.owner.typ.sons[0] = rhs.typ
+        else:
+          typeMismatch(n, lhs.typ, rhs.typ)
 
     n.sons[1] = fitNode(c, le, rhs)
     fixAbstractType(c, n)
@@ -1167,11 +1146,16 @@ proc semProcBody(c: PContext, n: PNode): PNode =
     # ``result``:
     if result.kind == nkSym and result.sym == c.p.resultSym:
       nil
-    elif result.kind == nkNilLit or ImplicitlyDiscardable(result):
-      # intended semantic: if it's 'discardable' and the context allows for it,
-      # discard it. This is bad for chaining but nicer for C wrappers. 
-      # ambiguous :-(
+    elif result.kind == nkNilLit:
+      # or ImplicitlyDiscardable(result):
+      # new semantic: 'result = x' triggers the void context
       result.typ = nil
+    elif result.kind == nkStmtListExpr and result.typ.kind == tyNil:
+      # to keep backwards compatibility bodies like:
+      #   nil
+      #   # comment
+      # are not expressions:
+      fixNilType(result)
     else:
       var a = newNodeI(nkAsgn, n.info, 2)
       a.sons[0] = newSymNode(c.p.resultSym)
@@ -1458,26 +1442,35 @@ proc semMagic(c: PContext, n: PNode, s: PSym, flags: TExprFlags): PNode =
   of mQuoteAst: result = semQuoteAst(c, n)
   else: result = semDirectOp(c, n, flags)
 
-proc semIfExpr(c: PContext, n: PNode): PNode = 
-  result = n
-  checkMinSonsLen(n, 2)
-  var typ: PType = nil
+proc semWhen(c: PContext, n: PNode, semCheck = true): PNode =
+  # If semCheck is set to false, ``when`` will return the verbatim AST of
+  # the correct branch. Otherwise the AST will be passed through semStmt.
+  result = nil
+  
+  template setResult(e: expr) =
+    if semCheck: result = semStmt(c, e) # do not open a new scope!
+    else: result = e
+
   for i in countup(0, sonsLen(n) - 1): 
     var it = n.sons[i]
     case it.kind
-    of nkElifExpr: 
+    of nkElifBranch, nkElifExpr: 
       checkSonsLen(it, 2)
-      it.sons[0] = forceBool(c, semExprWithType(c, it.sons[0]))
-      it.sons[1] = semExprWithType(c, it.sons[1])
-      if typ == nil: typ = it.sons[1].typ
-      else: it.sons[1] = fitNode(c, typ, it.sons[1])
-    of nkElseExpr: 
+      var e = semConstExpr(c, it.sons[0])
+      if e.kind != nkIntLit: InternalError(n.info, "semWhen")
+      elif e.intVal != 0 and result == nil:
+        setResult(it.sons[1]) 
+    of nkElse, nkElseExpr:
       checkSonsLen(it, 1)
-      it.sons[0] = semExprWithType(c, it.sons[0])
-      if typ != nil: it.sons[0] = fitNode(c, typ, it.sons[0])
-      else: InternalError(it.info, "semIfExpr")
+      if result == nil: 
+        setResult(it.sons[0])
     else: illFormedAst(n)
-  result.typ = typ
+  if result == nil:
+    result = newNodeI(nkEmpty, n.info) 
+  # The ``when`` statement implements the mechanism for platform dependent
+  # code. Thus we try to ensure here consistent ID allocation after the
+  # ``when`` statement.
+  IDsynchronizationPoint(200)
 
 proc semSetConstr(c: PContext, n: PNode): PNode = 
   result = newNodeI(nkCurly, n.info)
@@ -1644,26 +1637,21 @@ proc semObjConstr(c: PContext, n: PNode, flags: TExprFlags): PNode =
     it.sons[1] = e
     # XXX object field name check for 'case objects' if the kind is static?
 
-proc semStmtListExpr(c: PContext, n: PNode): PNode = 
-  result = n
-  checkMinSonsLen(n, 1)
-  var length = sonsLen(n)
-  for i in countup(0, length - 2): 
-    n.sons[i] = semStmt(c, n.sons[i])
-  if length > 0: 
-    n.sons[length - 1] = semExprWithType(c, n.sons[length - 1])
-    n.typ = n.sons[length - 1].typ
-
-proc semBlockExpr(c: PContext, n: PNode): PNode = 
+proc semBlock(c: PContext, n: PNode): PNode =
   result = n
   Inc(c.p.nestedBlockCounter)
   checkSonsLen(n, 2)
   openScope(c.tab)            # BUGFIX: label is in the scope of block!
-  if n.sons[0].kind notin {nkEmpty, nkSym}:
-    # nkSym for gensym'ed labels:
-    addDecl(c, newSymS(skLabel, n.sons[0], c))
-  n.sons[1] = semStmtListExpr(c, n.sons[1])
+  if n.sons[0].kind != nkEmpty:
+    var labl = newSymG(skLabel, n.sons[0], c)
+    if sfGenSym notin labl.flags:
+      addDecl(c, labl)
+      n.sons[0] = newSymNode(labl, n.sons[0].info)
+    suggestSym(n.sons[0], labl)
+  n.sons[1] = semExpr(c, n.sons[1])
   n.typ = n.sons[1].typ
+  if isEmptyType(n.typ): n.kind = nkBlockStmt
+  else: n.kind = nkBlockExpr
   closeScope(c.tab)
   Dec(c.p.nestedBlockCounter)
 
@@ -1683,63 +1671,11 @@ proc buildCall(n: PNode): PNode =
   else:
     result = n
 
-proc semCaseExpr(c: PContext, caseStmt: PNode): PNode =
-  # The case expression is simply rewritten to a StmtListExpr:
-  #   var res {.noInit, genSym.}: type(values)
-  #
-  #   case E
-  #   of X: res = value1
-  #   of Y: res = value2
-  # 
-  #   res
-  var
-    info = caseStmt.info
-    resVar = newSym(skVar, idAnon, getCurrOwner(), info)
-    resNode = newSymNode(resVar, info)
-    resType: PType
-
-  resVar.flags = { sfGenSym, sfNoInit }
-
-  for i in countup(1, caseStmt.len - 1):
-    var cs = caseStmt[i]
-    case cs.kind
-    of nkOfBranch, nkElifBranch, nkElse:
-      # the value is always the last son regardless of the branch kind
-      cs.checkMinSonsLen 1
-      var value = cs{-1}
-      if value.kind == nkStmtList: value.kind = nkStmtListExpr
-
-      value = semExprWithType(c, value)
-      if resType == nil:
-        resType = value.typ
-      elif not sameType(resType, value.typ):
-        # XXX: semeType is a bit too harsh.
-        # work on finding a common base type.
-        # this will be useful for arrays/seq too:
-        # [ref DerivedA, ref DerivedB, ref Base]
-        typeMismatch(cs, resType, value.typ)
-
-      cs{-1} = newNode(nkAsgn, cs.info, @[resNode, value])
-    else:
-      IllFormedAst(caseStmt)
-
-  result = newNode(nkStmtListExpr, info, @[
-    newNode(nkVarSection, info, @[
-      newNode(nkIdentDefs, info, @[
-        resNode,
-        symNodeFromType(c, resType, info),
-        emptyNode])]),
-    caseStmt,
-    resNode])
-
-  result = semStmtListExpr(c, result)
-
 proc fixImmediateParams(n: PNode): PNode =
   # XXX: Temporary work-around until we carry out
   # the planned overload resolution reforms
   for i in 1 .. <safeLen(n):
     if n[i].kind == nkDo: n.sons[i] = n[i][bodyPos]
-  
   result = n
 
 proc semExport(c: PContext, n: PNode): PNode =
@@ -1903,7 +1839,7 @@ proc semExpr(c: PContext, n: PNode, flags: TExprFlags = {}): PNode =
   of nkObjConstr: result = semObjConstr(c, n, flags)
   of nkLambdaKinds: result = semLambda(c, n, flags)
   of nkDerefExpr: result = semDeref(c, n)
-  of nkAddr: 
+  of nkAddr:
     result = n
     checkSonsLen(n, 1)
     n.sons[0] = semExprWithType(c, n.sons[0])
@@ -1914,9 +1850,7 @@ proc semExpr(c: PContext, n: PNode, flags: TExprFlags = {}): PNode =
     checkSonsLen(n, 1)
     n.sons[0] = semExpr(c, n.sons[0], flags)
   of nkCast: result = semCast(c, n)
-  of nkIfExpr: result = semIfExpr(c, n)
-  of nkStmtListExpr: result = semStmtListExpr(c, n)
-  of nkBlockExpr: result = semBlockExpr(c, n)
+  of nkIfExpr, nkIfStmt: result = semIf(c, n)
   of nkHiddenStdConv, nkHiddenSubConv, nkConv, nkHiddenCallConv: 
     checkSonsLen(n, 2)
   of nkStringToCString, nkCStringToString, nkObjDownConv, nkObjUpConv: 
@@ -1933,22 +1867,19 @@ proc semExpr(c: PContext, n: PNode, flags: TExprFlags = {}): PNode =
   of nkStaticExpr:
     result = semStaticExpr(c, n)
   of nkAsgn: result = semAsgn(c, n)
-  of nkBlockStmt: result = semBlock(c, n)
-  of nkStmtList: result = semStmtList(c, n)
+  of nkBlockStmt, nkBlockExpr: result = semBlock(c, n)
+  of nkStmtList, nkStmtListExpr: result = semStmtList(c, n)
   of nkRaiseStmt: result = semRaise(c, n)
   of nkVarSection: result = semVarOrLet(c, n, skVar)
   of nkLetSection: result = semVarOrLet(c, n, skLet)
   of nkConstSection: result = semConst(c, n)
   of nkTypeSection: result = SemTypeSection(c, n)
-  of nkIfStmt: result = SemIf(c, n)
   of nkDiscardStmt: result = semDiscard(c, n)
   of nkWhileStmt: result = semWhile(c, n)
   of nkTryStmt: result = semTry(c, n)
   of nkBreakStmt, nkContinueStmt: result = semBreakOrContinue(c, n)
   of nkForStmt, nkParForStmt: result = semFor(c, n)
-  of nkCaseStmt:
-    if efWantStmt in flags: result = semCase(c, n)
-    else: result = semCaseExpr(c, n)
+  of nkCaseStmt: result = semCase(c, n)
   of nkReturnStmt: result = semReturn(c, n)
   of nkAsmStmt: result = semAsm(c, n)
   of nkYieldStmt: result = semYield(c, n)

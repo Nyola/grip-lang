@@ -81,13 +81,13 @@ proc addTok(g: var TSrcGen, kind: TTokType, s: string) =
 
 proc addPendingNL(g: var TSrcGen) = 
   if g.pendingNL >= 0: 
-    addTok(g, tkInd, "\n" & repeatChar(g.pendingNL))
+    addTok(g, tkSpaces, "\n" & repeatChar(g.pendingNL))
     g.lineLen = g.pendingNL
     g.pendingNL = - 1
 
 proc putNL(g: var TSrcGen, indent: int) = 
   if g.pendingNL >= 0: addPendingNL(g)
-  else: addTok(g, tkInd, "\n")
+  else: addTok(g, tkSpaces, "\n")
   g.pendingNL = indent
   g.lineLen = indent
 
@@ -939,10 +939,9 @@ proc gsub(g: var TSrcGen, n: PNode, c: TContext) =
     gsub(g, n.sons[0])
     put(g, tkDotDot, "..")
     gsub(g, n.sons[1])
-  of nkDerefExpr: 
+  of nkDerefExpr:
     gsub(g, n.sons[0])
-    putWithSpace(g, tkOpr, "^") 
-    # unfortunately this requires a space, because ^. would be only one opr
+    put(g, tkOpr, "[]")
   of nkAccQuoted:
     put(g, tkAccent, "`")
     if n.len > 0: gsub(g, n.sons[0])

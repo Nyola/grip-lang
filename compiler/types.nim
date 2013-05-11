@@ -486,7 +486,9 @@ proc TypeToString(typ: PType, prefer: TPreferedDesc = preferName): string =
   of tyPtr, tyRef, tyVar, tyMutable, tyConst: 
     result = typeToStr[t.kind] & typeToString(t.sons[0])
   of tyRange:
-    result = "range " & rangeToStr(t.n) & "(" & typeToString(t.sons[0]) & ")"
+    result = "range " & rangeToStr(t.n)
+    if prefer != preferExported:
+      result.add("(" & typeToString(t.sons[0]) & ")")
   of tyProc:
     result = if tfIterator in t.flags: "iterator (" else: "proc ("
     for i in countup(1, sonsLen(t) - 1): 
@@ -904,6 +906,26 @@ proc inheritanceDiff*(a, b: PType): int =
     inc(result)
   result = high(int)
 
+proc commonSuperclass*(a, b: PType): PType =
+  # quick check: are they the same?
+  if sameObjectTypes(a, b): return a
+
+  # simple algorithm: we store all ancestors of 'a' in a ID-set and walk 'b'
+  # up until the ID is found:
+  assert a.kind == tyObject
+  assert b.kind == tyObject
+  var x = a
+  var ancestors = initIntSet()
+  while x != nil:
+    x = skipTypes(x, skipPtrs)
+    ancestors.incl(x.id)
+    x = x.sons[0]
+  var y = b
+  while y != nil:
+    y = skipTypes(y, skipPtrs)
+    if ancestors.contains(y.id): return y
+    y = y.sons[0]
+
 proc typeAllowedAux(marker: var TIntSet, typ: PType, kind: TSymKind): bool
 proc typeAllowedNode(marker: var TIntSet, n: PNode, kind: TSymKind): bool = 
   result = true
@@ -1261,3 +1283,14 @@ proc compatibleEffects*(formal, actual: PType): bool =
       result = compatibleEffectsAux(st, real.sons[tagEffects])
       if not result: return
   result = true
+
+proc isCompileTimeOnly*(t: PType): bool {.inline.} =
+  result = t.kind in {tyTypedesc, tyExpr}
+
+proc containsCompileTimeOnly*(t: PType): bool =
+  if isCompileTimeOnly(t): return true
+  if t.sons != nil:
+    for i in 0 .. <t.sonsLen:
+      if t.sons[i] != nil and isCompileTimeOnly(t.sons[i]):
+        return true
+  return false
